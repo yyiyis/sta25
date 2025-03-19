@@ -1,0 +1,768 @@
+---
+title: "2_simu_vari_2"
+subtitle: "update 做了一些更新"
+author: "YYS"
+date: "2025-3-17"
+toc: true
+number-sections: true
+format:
+  html:
+    theme: litera
+    df-print: kable
+  docx: 
+    execute:
+    echo: false
+    df-print: kable
+---
+
+```{r setup}
+#| include: false
+knitr::opts_chunk$set(warning = F, message = F, dpi = 300)
+```
+
+```{r}
+#| include: false
+rm(list = ls())
+```
+
+
+**mark** 做了一些更新
+
+- 后面模拟的 n 太大了, 要小样本
+
+- 不要增大到1000
+
+    - 20,  30,  50,  100 (这些经典方法都是小样本的, n不会太大)
+    
+- SE 就是标准化残差, SE 影响了 均数比较
+
+    - 之前上课模拟只看了 中心(中心极限定理时候), 没有看精确度
+
+- 数据转换
+
+    - 改变分布，同时方差齐了, 一箭双雕
+    
+    - 差异的性质是不改变的, 而 ANOVA 看差异, 不影响解释
+    
+    - 而 regression 里面我们不推荐用 ln 是因为不好解释了
+    
+- 非正态总体抽样才有机会看到方差不齐
+
+- 组间样本量不要悬殊太大, 这些也会影响 SE
+
+- 稳健ANOVA的本质
+
+
+**要讲清楚为什么**
+
+# load packages and data
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(DataExplorer)
+library(ggsci)
+library(ggridges)
+library(gtsummary)
+library(rrcov)
+library(readxl)
+library(mvnormtest) 
+library(rstatix) 
+library(heplots)
+```
+
+
+# Q2
+
+多元方差分析有意义之后, 下一步如何做
+
+🌀 **Q: 试分析不同组的TG 和 ALT**
+
+```{r}
+data0 <- read_excel("~/Desktop/r4ds/stahomework/M_24_sta/1_MANOVA/data/stadata.xlsx")
+```
+
+```{r}
+data <- data0 |> 
+  mutate(group = factor(group)) |> 
+  filter(TG < 3)
+```
+
+
+```{r}
+glimpse(data)
+```
+
+
+## description
+
+-   每个变量在每个地区的基本描述
+
+     - 这个图是能够看出来东西的: C 的 variance 比较大
+
+
+```{r}
+data |> 
+  pivot_longer(
+    cols = "TG":"ALT", 
+    names_to = "variable", 
+    values_to = "value"
+  ) |> 
+  ggplot(aes(group, value, color = group)) +
+  geom_boxplot() + 
+  scale_color_lancet() + 
+  facet_wrap( ~ variable, scales = "free") + 
+  labs(x = "Group", y = "Value") +
+  theme(legend.position = "none", 
+        strip.text.x = element_text(size = 16), 
+        axis.text = element_text(size = 15), 
+        axis.title = element_text(size = 15))
+```
+
+
+- table 1 里面
+
+     - 一方面, 我们知道, ANOVA 每组样本量相等时候效率高, 这个数据不等, 也是现实的
+     
+     - 另一方面, 这里比较用的都是非参的方法
+
+```{r}
+data |> 
+  tbl_summary(by = group, 
+              statistic = list(c("ALT") ~ "{mean} ({sd})"),
+              digits = all_continuous() ~ 2,
+              missing = "no") |> 
+  add_overall() |> 
+  add_p(pvalue_fun = ~style_pvalue(.x, digits = 3)) |> 
+  modify_header(update = list(p.value ~ "**P**")) |> 
+  modify_footnote(all_stat_cols() ~ "Mean (SD); Median (Q1, Q3)") |> 
+  bold_labels() 
+```
+
+
+
+## 条件检验
+
+```{r}
+attach(data)
+y <- cbind(ALT, TG)
+```
+
+
+-   多元正态检验
+
+    - 更多还是看图
+
+```{r}
+y |> as.matrix() |> t() |> mshapiro.test()
+qqplot(qchisq(ppoints(nrow(y)), df = ncol(y)), 
+       mahalanobis(y, colMeans(y), cov(y))) 
+abline(a = 0, b = 1)
+```
+
+
+- 方差齐性检验
+
+    - Box M 检验比较敏感, 很容易拒绝H0, 但这不影响我们做后面的工作
+    
+```{r}
+res <- boxM(y, group)
+res
+```
+
+
+```{r}
+#| eval: false
+summary(res)
+```
+
+
+## MANOVA
+
+- 默认用的 "Pillai"
+
+```{r}
+fit <- manova(y ~ factor(group))
+summary(fit)
+```
+
+
+```{r}
+summary(fit, test = "Wilks") 
+```
+
+
+```{r}
+summary.aov(fit) # 单因素
+```
+
+
+```{r}
+detach(data)
+```
+
+-   稳健MANOVA
+
+    - 稳健 MANOVA 里面具体干了啥
+    
+```{r}
+#| eval: false
+?Wilks.test()
+```
+
+- "c" for standard estimators of the mean and variance
+
+- "Bartlett" for Bartlett approximation (default), "Rao" for rao approximation (only for method = "c") and "empirical" for simulated empirical distribution.
+
+
+```{r}
+Wilks.test(data$group ~ .,
+           data = data[c("ALT",
+                         "TG")], 
+           method = "c", 
+           approximation = "Bartlett")
+```
+
+
+```{r}
+Wilks.test(data$group ~ .,
+           data = data[c("ALT",
+                         "TG")], 
+           method = "c", 
+           approximation = "Rao")
+```
+
+
+
+**以上结果提示**
+
+-   MANOVA结果显示, 多个结局捆绑在一起时，三个组差异有统计学意义 (P < 0.001)
+
+-   各自做单因素, 三个组ALT差异有统计学意义
+
+-   多元正态和协方差阵齐同的条件不太满足, 所以进一步做了"稳健MANOVA", 结果显示三个组差异有统计学意义 (P < 0.001)
+
+- 进一步通过校正$\alpha$来进行两两稳健 Hotelling *T^2^*
+
+
+
+## 两两hotelling
+
+```{r}
+b <- combn(levels(data$group), 2)
+b
+```
+
+
+```{r}
+yysfun_hot <- function(n){
+  hotelling <- with(data |> filter(group %in% c(b[,n])),
+                    T2.test(
+                      cbind(ALT, TG) ~ group)
+                    )  
+  phot <- hotelling$p.value 
+  return(c(b[,n], phot))
+}
+```
+
+- `Bonferroni` 校正有两种做法, 一种是校正 *P*, 一种是校正 $\alpha$
+
+    - 这里为了直观, 我们报告原始 P_hotelling, 选取校正 $\alpha$
+    
+    - 同时对 P_hotelling 进行 FDR (Benjamini-Hochberg法)
+    
+- `FDR` 的原理
+
+    - 对原始 P 进行排序, i 是从小到大的排名
+    
+    - $P_{fdr} = P * \frac{n}{i}$
+    
+    - 计算的值需要与上一个计算值相比较, 取二者较小值
+    
+
+```{r}
+map(c(1:ncol(b)), yysfun_hot) |>
+  unlist() |> matrix(nc = 3, byrow = T) |> as.data.frame() |>
+  rename(P_hotelling = V3) |>
+  mutate(
+    pair = paste(V1, V2),
+    P_hotelling = as.double(P_hotelling),
+    
+    PBonf_if = case_when(P_hotelling > 0.05 / 6 ~ "negative", T ~ "positive"),
+    P_hotelling = sprintf("%.3f", P_hotelling), 
+    
+    PFDR = p.adjust(P_hotelling, method = "BH"),
+    PFDR_if = case_when(PFDR > 0.05 ~ "negative", T ~ "positive"),
+    PFDR = sprintf("%.3f", PFDR)
+  ) |>
+  select(Pair = pair, P_hotelling, PFDR, PBonf_if, PFDR_if) 
+```
+
+`PFDR` 结果显示, CD之间差异 P value 在0.05附近
+
+
+***
+
+# simu Q3  mark 改到这里了
+
+**ANOVA条件**
+
+- 各样本相互独立的随机样本, 均来自正态总体
+
+- 各样本的总体方差相等
+
+- 另外: 注意检查残差
+
+
+## data
+
+```{r}
+#| eval: false
+yysfun_n <- function(n) {
+  set.seed(567)
+  tibble(group = rep(c("A", "B", "C"), each = n),
+         # 正态
+         Normal = c(
+           rnorm(n = n, mean = 100, sd = 5),
+           rnorm(n = n, mean = 120, sd = 5),
+           rnorm(n = n, mean = 140, sd = 5)
+         ))
+}
+```
+
+```{r}
+yysfun_n <- function(n) {
+  set.seed(567)
+  tibble(
+    group = rep(c("A", "B", "C"), each = n),
+    
+    # 正态
+    Normal = c(
+      rnorm(n = n, mean = 100, sd = 5),
+      rnorm(n = n, mean = 120, sd = 5),
+      rnorm(n = n, mean = 140, sd = 5)
+    ),
+    
+    # 均匀分布
+    Unifrom = c(
+      runif(n, 90, 110), 
+      runif(n, 90, 110) + 20, 
+      runif(n, 90, 110) + 40
+    ), 
+    
+    # 指数分布
+    Exponential = c(
+      rexp(n, rate = 1 / 100),
+      rexp(n, rate = 1 / 100) + 20,
+      rexp(n, rate = 1 / 100) + 40
+    )
+  )
+}
+```
+
+
+$$f(x) = \lambda e ^ {-\lambda x}$$
+
+
+
+## describe
+
+```{r}
+#| fig-width: 8
+#| fig-height: 3
+yysfun_n(100000) |>
+  pivot_longer(cols = c("Normal", "Unifrom", "Exponential"),
+               names_to = "type",
+               values_to = "value") |>
+  mutate(type = fct_relevel(type, "Normal", "Unifrom", "Exponential")) |> 
+  ggplot(aes(x = value, y = group, fill = type)) +
+  geom_density_ridges() + 
+  facet_wrap(~ type, scales = "free") + 
+  labs(x = "Simulation value", y = "Group") + 
+  theme(legend.position = "none", 
+        strip.text.x = element_text(size = 16), 
+        axis.text = element_text(size = 15), 
+        axis.title = element_text(size = 15))
+```
+
+
+## anova 角度
+
+
+```{r}
+yysfun_n(30) |>
+  tbl_summary(by = group, 
+              statistic = list(c("Normal") ~ "{mean} ({sd})"),
+              digits = all_continuous() ~ 2,
+              missing = "no") |> 
+  add_overall() |> 
+  modify_footnote(all_stat_cols() ~ "Mean (SD), Median (Q1, Q3)") |> 
+  bold_labels() 
+```
+
+
+通过方差分析结果来看
+
+
+```{r}
+yysfun_anova <- function(x) {
+  aov(x ~ group, data = df) |>
+    tidy() |>
+    mutate(
+      p.value = case_when(p.value < 0.001 ~ "< 0.001", 
+                          !is.na(p.value) ~ sprintf("%.3f", p.value)),
+      statistic = case_when(!is.na(statistic) ~ sprintf("%.0f", statistic)),
+      sumsq = sprintf("%.0f", sumsq),
+      meansq = sprintf("%.0f", meansq), 
+      statistic = case_when(is.na(statistic) ~ " ", T ~ statistic), 
+      p.value = case_when(is.na(p.value) ~ " ", T ~ p.value) 
+      )|>
+    rename(SS = sumsq,
+           MS = meansq,
+           `F` = statistic,
+           P = p.value)
+}
+```
+
+
+20,  30,  50,  100
+
+
+```{r}
+df <- yysfun_n(20)
+na20 <- map(df %>% select(-group), yysfun_anova) |>
+  data.table::rbindlist(idcol = "type") |> 
+  # mutate(type = case_when(term == "Residuals" ~ " ", T ~ type)) |> 
+  mutate(N_each_group = "20")
+```
+
+
+
+```{r}
+df <- yysfun_n(30)
+na30 <- map(df %>% select(-group), yysfun_anova) |>
+  data.table::rbindlist(idcol = "type") |> 
+  # mutate(type = case_when(term == "Residuals" ~ " ", T ~ type)) |> 
+  mutate(N_each_group = "30")
+```
+
+```{r}
+df <- yysfun_n(50)
+na50 <- map(df %>% select(-group), yysfun_anova) |>
+  data.table::rbindlist(idcol = "type") |> 
+  # mutate(type = case_when(term == "Residuals" ~ " ", T ~ type)) |> 
+  mutate(N_each_group = "50")
+```
+
+```{r}
+df <- yysfun_n(100)
+na100 <- map(df %>% select(-group), yysfun_anova) |>
+  data.table::rbindlist(idcol = "type") |> 
+  # mutate(type = case_when(term == "Residuals" ~ " ", T ~ type)) |> 
+  mutate(N_each_group = "100")
+```
+
+
+```{r}
+rbind(na20, na30, na50, na100) |> 
+  filter(type == "Exponential") |> 
+  mutate(N_each_group = case_when(term == "Residuals" ~ " ", 
+                                  T ~ N_each_group),
+         type = case_when(term == "group" & N_each_group == "20" ~ type, 
+                          T ~ " "))
+```
+
+### 整活 1
+
+可以绘制 SS of residual and P 随 n 的变化
+
+```{r}
+yysfun_test_n_anova <- function(n) {
+  set.seed(567)
+  df <- tibble(
+    group = rep(c("A", "B", "C"), each = n),
+    
+    # 正态
+    Normal = c(
+      rnorm(n = n, mean = 100, sd = 5),
+      rnorm(n = n, mean = 120, sd = 5),
+      rnorm(n = n, mean = 140, sd = 5)
+    ),
+    
+    # 均匀分布
+    Unifrom = c(runif(n, 90, 110), runif(n, 90, 110) + 20, runif(n, 90, 110) + 40),
+    
+    # 指数分布
+    Exponential = c(
+      rexp(n, rate = 1 / 100),
+      rexp(n, rate = 1 / 100) + 20,
+      rexp(n, rate = 1 / 100) + 40
+    )
+  )
+  map(df %>% select(-group), 
+      ~ aov(.x ~ df$group) |> tidy()) |>
+    data.table::rbindlist(idcol = "type") |>
+    mutate(N = n)
+}
+
+res_aov <- map_dfr(2:100, yysfun_test_n_anova) |> 
+  mutate(term = case_when(term == "df$group" ~ "Group", T ~ term))
+```
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 3
+res_aov |> 
+  ggplot(aes(N, p.value, color = type)) + 
+  geom_point() + 
+  scale_color_lancet() + 
+  facet_wrap( ~ type, scales = "free") +
+  labs(x = "Each group n", 
+       y = expression(italic("P"))) + 
+  theme(legend.position = "none", 
+        strip.text.x = element_text(size = 14), 
+        axis.text = element_text(size = 10), 
+        axis.title = element_text(size = 12)) 
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+res_aov |> 
+  ggplot(aes(N, sumsq, color = type)) + 
+  geom_point() + 
+  scale_color_lancet() + 
+  facet_grid(term ~ type, scales = "free") + 
+  labs(y = "Sum of square") + 
+  theme(legend.position = "none", 
+        strip.text = element_text(size = 14), 
+        axis.text = element_text(size = 10), 
+        axis.title = element_text(size = 12)) 
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+res_aov |> 
+  ggplot(aes(N, meansq, color = type)) + 
+  geom_point() + 
+  scale_color_lancet() + 
+  facet_grid(term ~ type, scales = "free") + 
+  labs(y = "Mean of square") + 
+  theme(legend.position = "none", 
+        strip.text = element_text(size = 14), 
+        axis.text = element_text(size = 10), 
+        axis.title = element_text(size = 12)) 
+```
+
+
+## lm 角度
+
+```{r}
+yysfun_lm <- function(x) {
+  lm(x ~ group, df) |>
+    tidy() |>
+    mutate(
+      p.value = case_when(p.value < 0.001 ~ "< 0.001", 
+                          !is.na(p.value) ~ sprintf("%.3f", p.value)),
+      estimate = sprintf("%.2f", estimate),
+      std.error = sprintf("%.2f", std.error),
+      statistic = sprintf("%.2f", statistic)
+    ) |>
+    rename(beta = estimate, 
+           P = p.value)
+}
+```
+
+
+```{r}
+df <- yysfun_n(20)
+map(df %>% select(-group), yysfun_lm) |>
+  data.table::rbindlist(idcol = "type") |> 
+  mutate(type = case_when(term != "(Intercept)" ~ " ", T ~ type)) |> 
+  mutate(N_each_group = "20")
+```
+
+```{r}
+df <- yysfun_n(30)
+map(df %>% select(-group), yysfun_lm) |>
+  data.table::rbindlist(idcol = "type") |> 
+  mutate(type = case_when(term != "(Intercept)" ~ " ", T ~ type)) |> 
+  mutate(N_each_group = "30")
+```
+
+```{r}
+df <- yysfun_n(50)
+map(df %>% select(-group), yysfun_lm) |>
+  data.table::rbindlist(idcol = "type") |> 
+  mutate(type = case_when(term != "(Intercept)" ~ " ", T ~ type)) |> 
+  mutate(N_each_group = "50")
+```
+
+
+```{r}
+df <- yysfun_n(100)
+map(df %>% select(-group), yysfun_lm) |>
+  data.table::rbindlist(idcol = "type") |> 
+  mutate(type = case_when(term != "(Intercept)" ~ " ", T ~ type)) |> 
+  mutate(N_each_group = "100")
+```
+
+
+
+
+
+### 整活 2
+
+可以绘制 beta 随 n 的变化
+
+```{r}
+yysfun_test_n_lm <- function(n) {
+  set.seed(567)
+  df <- tibble(
+    group = rep(c("A", "B", "C"), each = n),
+    
+    # 正态
+    Normal = c(
+      rnorm(n = n, mean = 100, sd = 5),
+      rnorm(n = n, mean = 120, sd = 5),
+      rnorm(n = n, mean = 140, sd = 5)
+    ),
+    
+    # 均匀分布
+    Unifrom = c(runif(n, 90, 110), runif(n, 90, 110) + 20, runif(n, 90, 110) + 40),
+    
+    # 指数分布
+    Exponential = c(
+      rexp(n, rate = 1 / 100),
+      rexp(n, rate = 1 / 100) + 20,
+      rexp(n, rate = 1 / 100) + 40
+    )
+  )
+  map(df %>% select(-group), 
+      ~ lm(.x ~ df$group) |> tidy()) |>
+    data.table::rbindlist(idcol = "type") |>
+    mutate(N = n)
+}
+
+res_lm <- map_dfr(2:100, yysfun_test_n_lm) |> 
+  mutate(term = case_when(term == "df$groupB" ~ "groupB", 
+                          term == "df$groupC" ~ "groupC", 
+                          T ~ term))
+```
+
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+res_lm |> 
+  ggplot(aes(N, std.error, color = type)) + 
+  geom_point() + 
+  scale_color_lancet() + 
+  facet_grid(term ~ type, scales = "free") +
+  labs(x = "Each group n", 
+       y = "Standard Error") + 
+  theme(legend.position = "none", 
+        strip.text = element_text(size = 14), 
+        axis.text = element_text(size = 10), 
+        axis.title = element_text(size = 12)) 
+```
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+res_lm |> 
+  ggplot(aes(N, estimate, color = type)) + 
+  geom_point() + 
+  scale_color_lancet() + 
+  facet_grid(term ~ type, scales = "free") +
+  labs(x = "Each group n", 
+       y = "Estimate (beta)") + 
+  theme(legend.position = "none", 
+        strip.text = element_text(size = 14), 
+        axis.text = element_text(size = 12), 
+        axis.title = element_text(size = 12)) 
+```
+
+
+## 处理
+
+### 变量变换
+
+缩小变异了
+
+```{r}
+df <- yysfun_n(50) |> 
+  mutate(ln_exp = log(Exponential))
+```
+
+
+```{r}
+map(df %>% select(-group), yysfun_anova) |>
+  data.table::rbindlist(idcol = "type") |> 
+  mutate(type = case_when(term == "Residuals" ~ " ", T ~ type))
+```
+
+
+```{r}
+map(df %>% select(-group), yysfun_lm) |>
+  data.table::rbindlist(idcol = "type") |> 
+  mutate(type = case_when(term != "(Intercept)" ~ " ", T ~ type))
+```
+
+
+
+### 增加样本量 
+
+这个在两个整活里面
+
+
+
+### 稳健 ANOVA
+
+更稳健的估计(稳健 anova 或者非参)
+
+```{r}
+df <- yysfun_n(50)
+kruskal.test(Exponential ~ group, data = df)
+```
+
+
+## add 数据变换的好处
+
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+n <- 30  
+tibble(
+  group = rep(c("A", "B", "C"), each = n),
+  log_normal = c(
+    exp(rnorm(n, mean = 2, sd = 0.3)), 
+    exp(rnorm(n, mean = 3, sd = 0.3)), 
+    exp(rnorm(n, mean = 4, sd = 0.3))
+  )
+) |> 
+  mutate(ln_value = log(log_normal)) |> 
+  pivot_longer(
+    cols = c(ln_value, log_normal), 
+    names_to = "type", 
+    values_to = "value"
+  ) |> 
+  mutate(type = fct_relevel(type, "log_normal", "ln_value")) |> 
+  ggplot(aes(x = value, fill = group)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap( ~ type, scales = "free") + 
+  labs(x = NULL, y = "Density", fill = "Group") + 
+  theme(legend.position = "top", 
+        strip.text.x = element_text(size = 16), 
+        axis.text = element_text(size = 15), 
+        axis.title = element_text(size = 15), 
+        legend.text = element_text(size = 15), 
+        legend.title = element_text(size = 15)) 
+```
+
+
+

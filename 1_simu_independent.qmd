@@ -1,0 +1,121 @@
+---
+title: "1_simu_independent"
+subtitle: "homework: 随机向量中独立变量的描述"
+author: "YYS"
+date: "2025-2-25"
+toc: true
+number-sections: true
+format:
+  html:
+    theme: litera
+    df-print: kable
+  docx: 
+    execute:
+    echo: false
+    df-print: kable
+execute: 
+  echo: true
+---
+
+```{r setup}
+#| include: false
+knitr::opts_chunk$set(warning = F, message = F, dpi = 300)
+```
+
+```{r}
+#| include: false
+rm(list = ls())
+```
+
+# load packages
+
+```{r}
+library(tidyverse)
+library(DataExplorer)
+library(GGally)
+library(gtsummary)
+```
+
+# simulation
+
+```{r}
+#| label: 记得设置随机种子
+set.seed(567)
+df <- tibble(
+  height = rnorm(n = 100, mean = 175, sd = 5),
+  weight = height / 3 + rnorm(100, 5, 1),
+  cell_count = rnorm(100, 10, 1)
+)
+```
+
+```{r}
+df |>
+  ggpairs(upper = list(continuous = wrap(
+    "cor", method = "pearson", size = 5
+  ))) +
+  theme(axis.text = element_text(size = 12),
+        strip.text = element_text(size = 14)) 
+```
+
+
+## mean vector and cov-matrix
+
+
+```{r}
+#| label: map 迭代
+df |> map_df(mean)
+```
+
+
+```{r}
+#| label: 宽转长后, 分组摘要
+df |> 
+  pivot_longer(cols = height:cell_count, 
+               names_to = "variable", 
+               values_to = "value") |> 
+  group_by(variable) |> 
+  summarise(mean = mean(value))
+```
+
+
+```{r}
+df |> cov()
+```
+
+```{r}
+df |> scale() |> cov()
+```
+
+
+## in research
+
+```{r}
+#| label: 再加一个 sex
+set.seed(567)
+df <- tibble(
+  height = rnorm(n = 100, mean = 175, sd = 5),
+  weight = height / 3 + rnorm(100, 5,  1),
+  cell_count = rnorm(100, 10, 1), 
+  
+  sex = sample(c("Male", "Female"), size = 100, replace = T),
+) |> 
+  mutate(sex = factor(sex))
+```
+
+
+```{r}
+#| label: gtsummary 用来做 table 1
+df |> 
+  tbl_summary(by = sex, 
+              label = list(height ~ "Height (cm)",
+                           weight ~ "Weight (kg)", 
+                           cell_count ~ "Cell count (No.)"),
+              statistic = list(all_continuous() ~ "{mean} ({sd})"),
+              digits = all_continuous() ~ 2,
+              missing = "no") |> 
+  add_overall() |> 
+  add_p(pvalue_fun = ~style_pvalue(.x, digits = 3),
+        list(all_continuous() ~ "t.test")) |> 
+  modify_footnote(all_stat_cols() ~ "Mean (SD)") |> 
+  bold_labels() 
+```
