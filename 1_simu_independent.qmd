@@ -9,10 +9,6 @@ format:
   html:
     theme: litera
     df-print: kable
-  docx: 
-    execute:
-    echo: false
-    df-print: kable
 execute: 
   echo: true
 ---
