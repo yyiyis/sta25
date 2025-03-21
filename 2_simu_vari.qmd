@@ -299,7 +299,7 @@ map(c(1:ncol(b)), yysfun_hot) |>
 
 ***
 
-# simu Q3  mark 改到这里了
+# simu Q3
 
 **ANOVA条件**
 
