@@ -1,0 +1,809 @@
+---
+title: "3_logis_cut_off"
+subtitle: "logis, sens, spec, cut-off"
+author: "YYS"
+date: "2025-4-6"
+toc: true
+number-sections: true
+format:
+  html:
+    theme: litera
+    df-print: kable
+---
+
+**现在的思路混乱了, 重新梳理思路**
+
+
+**Question**
+
+自找数据分析: 用 logistic 预测癌症风险时, 如何平衡灵敏度和特异度? 如何选择最佳阈值?
+
+
+事实上这是两个问题
+
+
+- 一个是根据疾病特征来 balance 灵敏度和特异度(这个已经讲过了)
+
+    - 对应的 cut-off 这条线放在哪里, 各个其实在那个分布图里面也已经有了
+    
+    - 如果拓展出去, 可以讲的一个点是: 选 cut-off, 这是临床非常喜欢的一个问题(两种做法)
+    
+- 另一个是从预测模型角度去整活 (`using logis`)
+
+    - 这个时候完全可以走 `tidymodels` 工作流
+    
+
+```{r setup}
+#| include: false
+knitr::opts_chunk$set(warning = F, message = F, dpi = 300)
+```
+
+```{r}
+#| include: false
+rm(list = ls())
+```
+
+```{r}
+options(scipen = 200)
+```
+
+
+# load packages
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(patchwork)
+library(lmtest)
+library(ggsci)
+library(MASS)
+library(kableExtra)
+library(DataExplorer)
+library(gtsummary)
+library(glmnet)
+library(probably)
+library(rms)
+library(reportROC)
+```
+
+
+
+# 关于  Sens, spec 的 balance and cut-off
+
+- 我们在筛检/诊断试验时候, 有两个分布的那个图 (patient and control)
+
+- Sens and Spec 事实上对应着误诊的漏诊
+
+- 我们cut-off 的选择，其实跟疾病本身有关
+
+    - 宁可错杀一千，也不放过一个(曹操)
+    
+    - 宁可放过一千，也不错杀一个(郭靖)
+    
+- 对于有明确治疗方法的, 晚发现(漏诊)很严重的, 以及传染病(COVID时候我们做核酸)
+
+    - 我们要提高Sens, 做三早
+
+- 但是对于 cancer, 现在是不能治疗的, 发现了还不如不发现
+
+    - 诊断出来反而给患者带来心理压力（尤其如果误诊，简直就是“完了！BBQ了”）
+    
+    - 我们也看到过，抗癌日记之类的，心理疗法是更重要的
+    
+**注意: Sens, Spec 只与筛检试验本身有关(一个试剂盒本身的性质)**
+
+
+
+# 模拟分布
+
+```{r}
+set.seed(123)
+tibble(
+  group = c(rep("Normal", 2000),
+            rep("Patient", 20)
+            ), 
+  value = c(
+    rnorm(2000, 50, 5), 
+    rnorm(20, 80, 10)
+  )
+) |> 
+  ggplot(aes(value, fill = group)) + 
+  geom_density(alpha = 0.4) +
+  geom_vline(xintercept = 61.5, lty = 5, color = "#254381", linewidth = 1) + 
+  # geom_vline(xintercept = 57, lty = 1, color = "red", linewidth = 1) + 
+  scale_fill_lancet() + 
+  labs(x = "Value", y = "Density", fill = "Group") + 
+  theme_void() + 
+  theme(legend.position = c(0.8, 0.8), 
+        legend.text = element_text(size = 15),
+        legend.title = element_text(size = 16)
+        )
+```
+
+
+```{r}
+set.seed(123)
+tibble(
+  group = c(rep("Normal", 2000),
+            rep("Patient", 20)
+            ), 
+  value = c(
+    rnorm(2000, 50, 5), 
+    rnorm(20, 80, 10)
+  )
+) |> 
+  ggplot(aes(value, fill = group)) + 
+  geom_density(alpha = 0.4) +
+  geom_vline(xintercept = 67, lty = 5, color = "#C94830", linewidth = 1) + 
+  # geom_vline(xintercept = 57, lty = 1, color = "red", linewidth = 1) + 
+  scale_fill_lancet() + 
+  labs(x = "Value", y = "Density", fill = "Group") + 
+  theme_void() + 
+  theme(legend.position = c(0.8, 0.8), 
+        legend.text = element_text(size = 15),
+        legend.title = element_text(size = 16)
+        )
+```
+
+
+***
+
+So the first thing, simu data for answering cut-off
+
+the second thing is show the tidymodels workflow
+
+
+# data simulation
+
+
+```{r}
+set.seed(567) 
+n <- 1000  
+df <- tibble(
+  age = rnorm(n, mean = 60, sd = 10),  
+  biomarker = rnorm(n, mean = 0, sd = 1), 
+  family_history = rbinom(n, 1, 0.2),
+  outcome = rbinom(n, 1, 
+                   plogis(-2 + 0.05 * age + 2 * biomarker + 1 * family_history))
+) |> 
+  mutate(outcome = factor(outcome))
+```
+
+## table 1
+
+```{r}
+df |> 
+  tbl_summary(by = outcome, 
+              label = list(family_history ~ "Family history"),
+              statistic = list(c("age", "biomarker") ~ "{mean} ({sd})"),
+              digits = all_continuous() ~ 2,
+              missing = "no") |> 
+  add_overall() |> 
+  add_p(pvalue_fun = ~style_pvalue(.x, digits = 3),
+        list(all_continuous() ~ "t.test")) |> 
+  modify_footnote(all_stat_cols() ~ "Mean (SD); n (%)") |> 
+  modify_header(p.value ~ "*P*") |>  
+  modify_caption("Table 1. Basic character") |> 
+  bold_labels() 
+```
+
+
+
+## ordinary modelling
+
+- 我们在这里先走传统的做法, 后面打开做一些事情
+
+```{r}
+form_reg <- as.formula(
+  paste("outcome ~ ", paste(colnames(df)[1:3], collapse = "+"))
+)
+form_reg
+```
+
+- In `base R` system, 来做 logis 很简单, 指定 `link function` 就行了
+
+
+```{r}
+fit <- glm(form_reg, 
+           family = "binomial", 
+           data = df)
+```
+
+```{r}
+fit |> summary()
+```
+
+- `summary()` 模型摘要里面是有很多附加信息的, 不要只盯着系数看
+
+
+### res coef
+
+- 指数化得到 OR 及区间
+
+$$exp(b_j) ~~ \& ~~ exp(b_j ~  \pm ~ 1.96 * S_{b_j} )$$
+```{r}
+fit |> tidy()
+fit |> tidy(exponentiate = T)
+```
+
+
+```{r}
+fit |> 
+  tbl_regression(exponentiate = T) |> 
+  modify_header(p.value ~ "*P*")
+```
+
+
+***
+
+还有一些杂七杂八结果如 森林图, 列线图, 校准曲线等等这里就不报告了, 因为这次核心是 `cut-off`
+
+对应的 ROC 可能是大家更感兴趣的东西
+
+**那么:**
+
+- ROC 在做什么样的事情? 这个曲线是怎么被画出来的? (note: 所有图形的本质都是散点图)
+
+- ROC 与 cut-off 的关系?
+
+    - 临床医生很喜欢拿 ROC 来选 cut-off (对应最左上角的点), 那么这样做对么?
+    
+    - 之前(包括现在)有些文章题目直接就是: "基于ROC曲线/列线图的预测模型", 这样对么?
+    
+- ROC 其实也是模型的一个附属结果
+
+    - 是结果呈现的一种形式(像森林图, 列线图那样)
+    
+    - 也是模型评价的一个指标(AUC) 
+    
+        - 当然还有 accuracy, sens, spec 等等指标
+    
+        - 这些在预测模型里面是很重要的
+    
+
+## ROC
+
+### using reportROC
+
+- see `?predict.glm` for more detail
+
+- 我们在这里放 `type = "response"` 即可
+
+```{r}
+df_roc <- df |> 
+  mutate(y_pred = predict(fit, type = "response"))
+```
+
+- `reportROC` 这个函数在 ROC 很强啊, 各种指标都给出来了
+
+```{r}
+#| fig-height: 4
+#| fig-width: 4
+reportROC(gold = df_roc$outcome,
+          predictor = df_roc$y_pred,
+          important = "sp",
+          plot = T)
+```
+
+
+**这个时候我们也会问, 这个 cut-off (0.676) 是怎么来的?**
+
+    - 这个包毕竟还是一个封装的包 (当然我们可以选中这个, 然后 cmd + enter)
+    
+    - 看下面的例子
+
+
+***
+
+### using yardstick
+
+```{r}
+df_roc |> 
+  mutate(y_pred_0 = 1 - y_pred) |> 
+  head()
+```
+
+
+```{r}
+df_roc |> 
+  mutate(y_pred_0 = 1 - y_pred) |> 
+  roc_auc(outcome, y_pred_0) 
+```
+
+
+```{r}
+df_roc |> 
+  mutate(y_pred_0 = 1 - y_pred) |> 
+  roc_curve(outcome, y_pred_0) |> 
+  sample_n(10)
+```
+
+
+```{r}
+df_roc |> 
+  mutate(y_pred_0 = 1 - y_pred) |> 
+  roc_curve(outcome, y_pred_0) |> 
+  ggplot(aes(x = 1 - specificity, 
+             y = sensitivity))+
+  geom_abline(lty = 2, color = "gray80", 
+              linewidth = 1.5) +
+  geom_path(alpha = 0.8, linewidth = 1) +
+  labs(x = "1 - Specificity", 
+       y = "Sensitivity") + 
+  coord_equal() +
+  theme_classic() + 
+  theme(axis.text = element_text(size = 14), 
+        axis.title = element_text(size = 14))
+```
+
+
+
+```{r}
+df_roc |> 
+  mutate(y_pred_0 = 1 - y_pred) |> 
+  roc_curve(outcome, y_pred_0) |> 
+  mutate(youden = sensitivity + specificity - 1) |>
+  slice_max(youden, n = 1)
+```
+
+
+```{r}
+1 - 0.3249796	
+```
+
+
+```{r}
+df_roc |> 
+  mutate(.pred_class = case_when(y_pred >= 0.6750204 ~ 1,  T ~ 0), 
+         .pred_class = factor(.pred_class)) |> 
+  conf_mat(outcome, .pred_class)
+```
+
+
+### an example to explain roc_auc in yardstick
+
+```{r}
+data(two_class_example)
+two_class_example |> head()
+```
+
+
+```{r}
+roc_auc(two_class_example, truth, Class1)
+```
+
+
+```{r}
+two_class_example |> 
+  roc_curve(truth, Class1) |> 
+  ggplot(aes(x = 1 - specificity, y = sensitivity))+
+  geom_abline(lty = 2, color = "gray80", linewidth = 1.5) +
+  geom_path(alpha = 0.8, linewidth = 1) +
+  labs(x = "1 - Specificity", y = "Sensitivity") + 
+  coord_equal() +
+  theme_classic()
+```
+
+```{r}
+two_class_example |> 
+  roc_curve(truth, Class2) |> 
+  ggplot(aes(x = 1 - specificity, y = sensitivity))+
+  geom_abline(lty = 2, color = "gray80", linewidth = 1.5) +
+  geom_path(alpha = 0.8, linewidth = 1) +
+  labs(x = "1 - Specificity", y = "Sensitivity") + 
+  coord_equal() +
+  theme_classic()
+```
+
+
+but if we transfer x and y
+
+```{r}
+two_class_example |> 
+  roc_curve(truth, Class2) |> 
+  ggplot(aes(y = 1 - specificity, x = sensitivity))+
+  geom_abline(lty = 2, color = "gray80", linewidth = 1.5) +
+  geom_path(alpha = 0.8, linewidth = 1) +
+  labs(x = "1 - Specificity", y = "Sensitivity") + 
+  coord_equal() +
+  theme_classic()
+```
+
+
+***
+
+# tidymodels system
+
+```{r}
+df |> glimpse()
+```
+
+
+## modelling
+
+```{r}
+set.seed(123)
+df_split <- initial_split(df, strata = outcome)
+df_train <- training(df_split)
+df_test <- testing(df_split)
+
+set.seed(234)
+df_folds_bs <- bootstraps(df_train, strata = outcome)
+```
+
+
+```{r}
+form_reg <- as.formula(
+  paste("outcome ~ ", paste(colnames(df)[1:3], collapse = "+"))
+)
+form_reg
+```
+
+```{r}
+df_recipe <- 
+  recipe(form_reg, data = df_train)
+```
+
+```{r}
+glm_spec <- logistic_reg() |> 
+  set_engine("glm")
+
+glm_wf <- workflow() |> 
+  add_recipe(df_recipe) |> 
+  add_model(glm_spec)
+```
+
+
+## res
+
+### metrics
+
+```{r}
+yysfun_metric_CI <- function(fmodel) {
+  set.seed(567)
+  rbind(
+    fmodel |>
+      fit_resamples(
+        resamples = df_folds_bs,
+        metrics = metric_set(accuracy, roc_auc, sens, spec # , recall, f_meas
+                             ),
+        control = control_resamples(save_pred = T)
+      ) |>
+      int_pctl(alpha = 0.05, times = 1000) |>
+      mutate(set = "train")
+    ,
+    
+    fmodel |>
+      last_fit(
+        df_split,
+        metrics = metric_set(accuracy, roc_auc, sens, spec# , recall, f_meas
+                             ),
+        control = control_resamples(save_pred = T)
+      ) |>
+      int_pctl(alpha = 0.05, times = 1000) |>
+      mutate(set = "test")
+  ) |>
+    mutate(
+      value = sprintf("%.2f", .estimate),
+      lower = sprintf("%.2f", .lower),
+      upper = sprintf("%.2f", .upper),
+      CI = paste(value, " (", lower, ", ", upper, ")", sep = "")
+    ) |>
+    select(Metric = .metric, CI, set, .estimate, .lower, .upper)
+}
+```
+
+
+
+```{r}
+glm_wf |> yysfun_metric_CI()
+```
+
+### roc in test
+
+```{r}
+roc_data <- glm_wf |> 
+  last_fit(df_split) |> 
+  collect_predictions() |>
+  roc_curve(outcome, .pred_0)
+roc_data |> sample_n(20)
+```
+
+
+```{r}
+roc_data |> 
+  ggplot(aes(x = 1 - specificity, y = sensitivity))+
+  geom_abline(lty = 2, color = "gray80", linewidth = 1.5) +
+  geom_path(alpha = 0.8, linewidth = 1)+
+  labs(color = "AUC in training [AUC (95% CI)]", 
+       x = "1 - Specificity", y = "Sensitivity") + 
+  coord_equal() +
+  scale_color_lancet() +
+  theme_classic() +
+  labs(title = "ROC in test") + 
+  theme(plot.title = element_text(size = 16, face = "bold"),  
+        axis.text = element_text(size = 14), 
+        axis.title = element_text(size = 14))
+```
+
+- 测试集混淆矩阵
+
+```{r}
+glm_wf |> 
+  last_fit(df_split) |> 
+  collect_predictions() |> 
+  conf_mat(outcome, .pred_class)
+```
+
+
+# next step 映射回去
+
+下一个事情是找最佳阈值(同时控制其他变量)
+
+- 固定其他变量在均值水平, 然后通过反向 logit 映射回去
+
+
+```{r}
+youden <- roc_data |>
+   mutate(youden = sensitivity + specificity - 1) |>
+   slice_max(youden, n = 1)
+youden
+```
+
+
+马上会说, 诶, 我们前面不是 0.32吗? 这里 `.threshold` 怎么 0.34了 
+
+- 因为前面是 full data set, 而这里是 in test set
+
+```{r}
+optimal_prob <- youden$.threshold
+```
+
+```{r}
+final_fit <- glm_wf |> 
+  last_fit(df_split) |> 
+  extract_fit_parsnip()
+
+coef <- coef(final_fit$fit)
+intercept <- coef[1]
+coef_age <- coef["age"]
+coef_biomarker <- coef["biomarker"]
+coef_fh <- coef["family_history"]
+```
+
+
+- **固定协变量为均值**
+
+```{r}
+mean_age <- mean(df_test$age)
+mean_fh <- mean(df_test$family_history)
+```
+
+
+反推 biomarker 的 cut-off (映射回去)
+
+```{r}
+fixed_logit <- 
+  intercept + 
+  coef_age * mean_age + 
+  coef_fh * mean_fh
+
+logit_optimal <- 
+  log(optimal_prob / (1 - optimal_prob))
+
+biomarker_cutoff <- 
+  (logit_optimal - fixed_logit) / coef_biomarker
+biomarker_cutoff
+```
+
+
+```{r}
+glm_wf |> 
+  last_fit(df_split) |> 
+  collect_predictions() |>
+  bind_cols(df_test) |> 
+  rename(outcome = outcome...6) |> 
+  ggplot(aes(x = biomarker, y = .pred_1, color = outcome)) +
+  geom_point(alpha = 0.5) +
+  # geom_hline(yintercept = optimal_prob, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = biomarker_cutoff, 
+             lty = 2, size = 1, alpha = 0.8, 
+             color = "blue") +
+  scale_color_lancet() + 
+  labs(x = "Biomarker", y = "Predicted Probability", 
+       color = "Outcome") +
+  theme_classic() +
+  theme(legend.position = c(0.8, 0.2),
+        axis.text = element_text(size = 14), 
+        axis.title = element_text(size = 14), 
+        legend.text = element_text(size = 14), 
+        legend.title = element_text(size = 14))
+```
+
+
+# if single biomarker
+
+```{r}
+fit_s <- glm(outcome ~ biomarker, family = "binomial", data = df)
+```
+
+
+```{r}
+#| fig-height: 4
+#| fig-width: 4
+df_roc_2 <- df |> 
+  mutate(y_pred_2 = predict(fit_s, type = "response"))
+
+reportROC(gold = df_roc_2$outcome,
+          predictor = df_roc_2$y_pred_2,
+          important = "sp",
+          plot = T)
+```
+
+***
+
+```{r}
+rm(list = ls())
+```
+
+***
+
+# Q2 WLS
+
+## simu data
+
+```{r}
+set.seed(567)
+df_1 <- tibble(
+  x = c(1:500), 
+  y = 10 + 2 * x + rnorm(500, 0, 10)
+)
+```
+
+```{r}
+set.seed(567)
+df_2 <- tibble(
+  x = c(1:500), 
+  y = 10 + 2 * x + rnorm(500, 0, x)
+)
+```
+
+## dist
+
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+#| output-location: slide
+df_1 |> 
+  ggplot(aes(x, y)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "Equal variance")|
+df_2 |> 
+  ggplot(aes(x, y)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "Non-equal variance")
+```
+
+
+## linear regression
+
+```{r}
+mod1 <- lm(y ~ x, df_1)
+mod2 <- lm(y ~ x, df_2)
+```
+
+模型结果摘要
+
+```{r}
+yysfun_summary <- function(model) {
+  s <- model |> summary()
+  s |> tidy() |>
+    filter(term != "(Intercept)") |>
+    mutate(
+      estimate = sprintf("%.3f", estimate), 
+      std.error = sprintf("%.3f", std.error), 
+      statistic = sprintf("%.3f", statistic),
+      R2 = sprintf("%.3f", s$r.squared),
+      Radj2 = sprintf("%.3f", s$adj.r.squared),
+      p.value = case_when(p.value < 0.001 ~ "< 0.001",
+                          TRUE ~ as.character(p.value))
+    ) |>
+    rename(`β` = estimate,
+           S.E. = std.error,
+           P = p.value)
+}
+```
+
+
+```{r}
+#| tbl-cap: "Comparision of 2 models"
+rbind(
+  yysfun_summary(mod1) |> mutate(model = "Equal variance", .before = 1),
+  yysfun_summary(mod2) |> mutate(model = "Non-equal variance", .before = 1)
+)
+```
+
+
+💠 **可以发现**:
+
+-   方差不齐时候, 标准误(S.E.)上来了
+
+-   $R^2$ 和 $R_{adj}^2$ 均变小
+
+
+### 残差 residual
+
+```{r}
+yysfun_resi <- function(model, df){
+  model |> residuals() |> 
+  as.tibble() |> 
+  mutate(x = df$x) |> 
+  ggplot(aes(x, value)) +
+  geom_hline(yintercept = 0, lty = 2, color = "#75AADB", size = 1.5) +
+  geom_point() +
+  labs(y = "Residual")
+}
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+#| output-location: slide
+p1 <- yysfun_resi(mod1, df_1) + labs(title = "Equal variance")
+p2 <- yysfun_resi(mod2, df_2) + labs(title = "Non-equal variance")
+p1|p2
+```
+
+💠 **很明显**
+
+-   方差齐的时候(左图), 大部分(`95.44%`) $\epsilon_i$ 在 $\mu - 2 \sigma$(即-20) 到 $\mu + 2 \sigma$(即20)之间
+
+-   方差不齐时候(右图), 残差多么明显的**喇叭口状**
+
+
+
+## 处理方差不齐
+
+### OLS + 稳健估计
+
+**稳健标准误**
+
+```{r}
+mod2_1 <- rlm(y ~ x, df_2)
+mod2_1 |> summary()
+```
+
+💠 **可以看到**:
+
+-   x 的系数`2.0167`, 比 `model 2` 的系数(2.0513)更接近 `2`
+
+
+### WLS 加权最小二乘
+
+-   不平等对待这些点, 把远的点拉回来
+
+-   设置**权重**是\[残差的绝对值的倒数\]
+
+```{r}
+res <- mod2 |> residuals()
+mod2_2 <- lm(y ~ x, df_2, weights = 1/abs(res))
+mod2_2 |> summary()
+```
+
+
+```{r}
+#| tbl-cap: "Comparision of 3 models"
+rbind(
+  yysfun_summary(mod1) |> mutate(model = "Equal variance", .before = 1),
+  yysfun_summary(mod2) |> mutate(model = "Non-equal variance", .before = 1),
+  yysfun_summary(mod2_2) |> mutate(model = "Non-equal with WLS", .before = 1)
+)
+```
+
+💠 **可以看到**
+
+-   标准误(S.E.)变小了(第三行相较于第二行)
+
+-   $R^2$ 和 $R_{adj}^2$ 均变大(回来了), 且接近第一行(`model 1`)
