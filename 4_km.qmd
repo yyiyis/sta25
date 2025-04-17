@@ -1,0 +1,598 @@
+---
+title: "4_km_expand"
+author: "YYS"
+date: "2025-4-15"
+toc: true
+number-sections: true
+format:
+  html:
+    theme: litera
+    df-print: kable
+---
+
+```{r setup}
+#| include: false
+knitr::opts_chunk$set(warning = F, message = F, dpi = 300)
+```
+
+```{r}
+#| include: false
+rm(list = ls())
+```
+
+```{r}
+options(scipen = 200)
+```
+
+
+
+1. Kaplan-Meier法假设“删失数据与事件发生无关(非信息性删失）”如果这一假设不成立，会导致什么问题？怎样解决？
+
+
+2. 请用模拟数据构成不同的删失比例(10%，30%，50%), 评价Kaplan-Meier估计的可靠性会如何变化？
+
+
+3. 如何用Bootstrap方法估计Kaplan-Meier曲线的置信区间？与传统Greenwood公式相比有何优劣？
+
+
+# load packages
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(survival)
+library(survminer)
+library(ggsci)
+library(scales)
+```
+
+
+
+
+***
+
+# T1
+
+**non-informative censored 非信息删失及处理**
+
+- censored 的假设: independent, random, and non-informative
+    
+    - independent (non-) affects validity
+    
+        - within any subgroup of interest......
+    
+    - random more restrictive 
+    
+        - subjects who are censored at time t should be representive of all time t with subjects who remained at risk an time t with respect to their survival experience.
+        
+        - means: failure rate for censored is assumed to be **equal to the failure rate** for subjects who remain in the risk set who are not censored.
+        
+        - in one group, no distinction between independent and random censoring
+        
+- for non-informative censoring
+        
+    - dist. of time-to-event and time-to-censorship
+    
+    - T provides no information of C, and vice versa
+
+    - must still need to know which subjects are censored or not censored   
+    
+    
+
+- 本来高风险的人 censored 掉了, 总的结果会高估生存率
+
+- 不同的删失机制(敏感性分析)
+
+    - 加速失效模型, 竞争风险模型, 多状态模型, 联合建模等
+
+- 带来的问题
+
+    - 生存率估计有偏性
+    
+    - 组间比较(效应被夸大或被掩盖, 继承1)
+    
+    - informative 会影响 risk subgroup 的分布, 影响方差, 进而影响区间估计
+    
+    - 尾巴不准确了~(长期效应)
+    
+    
+**发现及解决**
+
+- 最主要还是设计阶段和随访中, 尽量提高依从性, 减少删失~
+
+- 检查两组(censored and non-censored)基线特征分布
+
+- Sens analysis
+
+    - 假设所有 censored 马上发生结局(death), 或都存活
+    
+- 控制一些协变量(继承2)或加权(IPW)
+
+
+***
+
+**数据模拟思路**
+
+## simu data
+
+- 观察到的时间是生存时间(true_time)和删失时间(censor_time)中较早的那个。
+
+    - 如果 event 发生早于删失时间, status = 1
+
+    - 如果删失时间早, 说明观察被终止，status = 0
+
+```{r}
+set.seed(567)
+n <- 1000
+df <- tibble(
+  risk_cov = rnorm(n, mean = 0, sd = 1),
+  true_time = rexp(n, rate = 0.1), 
+  censor_time = rexp(n, rate = 0.1 * exp(risk_cov)),  # 高风险个体删失
+  
+  time = pmin(true_time, censor_time),
+  status = as.numeric(true_time <= censor_time)
+)
+```
+
+
+```{r}
+df |> 
+  ggplot(aes(risk_cov, color = factor(status))) + 
+  geom_density() + 
+  scale_color_lancet() + 
+  labs(x = "risk_cov", y = "Density", 
+       color = "Status") + 
+  theme_classic() + 
+  theme(legend.position = c(0.2, 0.8), 
+        legend.text = element_text(size = 15),
+        legend.title = element_text(size = 15), 
+        axis.text = element_text(size = 14), 
+        axis.title = element_text(size = 14))
+```
+
+## ori
+
+```{r}
+km_ori <- survfit(Surv(time, status) ~ 1, data = df)
+```
+
+```{r}
+ggsurvplot(
+  km_ori,
+  data = df,
+  conf.int = TRUE,
+  surv.median.line = "hv",
+  palette = c("#1A4486")
+) 
+```
+
+## sens simu bad
+
+最坏情况：删失个体立即发生事件
+
+```{r}
+data_worst <- df |> 
+  mutate(status_worst = if_else(status == 0, 1, status))
+
+km_worst <- survfit(Surv(time, status_worst) ~ 1, data = data_worst)
+
+
+ggsurvplot_combine(
+  list(original = km_ori, worst = km_worst),
+)$plot + 
+  labs(X = "Time (days)",
+       title = "Original vs Worst-Case", 
+       color = "Kinds") +
+  scale_color_lancet() + 
+  theme(legend.position = c(0.8, 0.8), 
+        legend.text = element_text(size = 15),
+        legend.title = element_text(size = 15), 
+        axis.text = element_text(size = 14), 
+        axis.title = element_text(size = 14))
+```
+
+## ipw
+
+```{r}
+censor_model <- glm(status == 0 ~ risk_cov, 
+                    family = "binomial", 
+                    data = df)
+
+df <- df |> 
+  mutate(weight = 1 / predict(censor_model, type = "response"))
+
+km_ipw <- survfit(Surv(time, status) ~ 1, 
+                  weights = weight, 
+                  data = df)
+```
+
+
+## compare
+
+
+```{r}
+list(
+  tibble(time = km_ori$time, surv_ori = km_ori$surv)
+  ,
+  tibble(time = km_ipw$time, surv_ipw = km_ipw$surv)
+) |>
+  reduce(inner_join, by = "time") |> 
+  mutate(surv_true = exp(-0.1 * time)) |> 
+  pivot_longer(cols = starts_with("surv_"), 
+               names_to = "methods", 
+               values_to = "surv") |> 
+  mutate(methods = factor(methods, 
+                          levels = c("surv_true", "surv_ori", "surv_ipw"), 
+                          labels = c("TRUE exponential", "Original", "IPW"))) |> 
+  ggplot(aes(time, surv, color = methods)) +
+  geom_step(linewidth = 1) + 
+  scale_color_lancet() + 
+  labs(x = "Time (days)", 
+       y = "Survival Probability", 
+       color = "Methods") + 
+  theme_classic() + 
+  theme(legend.position = c(0.8, 0.8), 
+        legend.text = element_text(size = 15),
+        legend.title = element_text(size = 15), 
+        axis.text = element_text(size = 14), 
+        axis.title = element_text(size = 14))
+```
+
+***
+
+# T2
+
+不同比例删失
+
+## simu data using quantile
+
+- 观察到的时间是生存时间(true_time)和删失时间(censor_time)中较早的那个。
+
+    - 如果 event 发生早于删失时间, status = 1
+
+    - 如果删失时间早, 说明观察被终止，status = 0
+
+```{r}
+yysfun_censored_q <- function(n, censor_rate) {
+  true_time <- rexp(n, 1 / 10)
+  
+  censor_time <- pmax(
+    quantile(true_time, 1 - censor_rate) + runif(n, -1, 1), 
+    0)
+  
+  observed_time <- pmin(true_time, censor_time)
+  status <- as.numeric(true_time <= censor_time)
+  
+  tibble(time = observed_time,
+         status = status,
+         censor_rate = censor_rate)
+}
+```
+
+- 检查一下我们模拟的 censor rate
+
+```{r}
+map_dfr(c(0.1, 0.3, 0.5), function(r) {
+  df <- yysfun_censored_q(200, censor_rate = r)
+  
+  tibble(censor_rate = r,
+         actual_censoring = mean(df$status == 0))
+})
+```
+
+### res
+
+```{r}
+set.seed(567)
+df_all_1 <- map_dfr(c(0.1, 0.3, 0.5), ~yysfun_censored_q(200, .x))
+```
+
+```{r}
+km_fit_1 <- survfit(Surv(time, status) ~ censor_rate, data = df_all_1)
+```
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 8
+ggsurvplot(
+  km_fit_1,
+  data = df_all_1,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  surv.median.line = "hv",
+  palette = c("#64B250", "#1A4486", "#DA3B21")
+) 
+```
+
+
+- 与真实率比较 MSE
+
+
+```{r}
+km_fit_1 |> 
+  tidy() |> 
+  filter(!is.na(estimate)) |> 
+  mutate(S_true = exp(-time / 10),
+         sq_error = (estimate - S_true)^2) |> 
+  group_by(strata) |> 
+  summarise(
+    MSE = mean(sq_error),
+    .groups = "drop"
+  ) 
+```
+
+
+
+- 带上 0
+
+```{r}
+set.seed(567)
+df_all_2 <- map_dfr(c(0, 0.1, 0.3, 0.5), ~yysfun_censored_q(200, .x))
+```
+
+```{r}
+km_fit_2 <- survfit(Surv(time, status) ~ censor_rate, data = df_all_2)
+```
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 8
+ggsurvplot(
+  km_fit_2,
+  data = df_all_2,
+  # conf.int = TRUE,
+  risk.table = TRUE,
+  surv.median.line = "hv",
+  palette = c("#8A609B", "#64B250", "#1A4486", "#DA3B21")
+)
+```
+
+```{r}
+S_true <- tibble(
+  time = seq(0, max(df_all_1$time), length.out = 200),
+  S = exp(-time / 10)
+)
+
+ggsurvplot(km_fit_1, data = df_all_1)$plot + 
+  geom_line(data = S_true, aes(x = time, y = S), 
+            linetype = "dashed") +
+  scale_color_lancet()
+```
+
+
+***
+
+
+```{r}
+#| eval: false
+show_col(pal_lancet("lanonc")(9))
+```
+
+
+## simu data using runif
+
+```{r}
+yysfun_censored_u <- function(n, censor_rate) {
+  true_time <- rexp(n, rate = 1/10)
+  
+  get_censor_upper_bound <- function(U) {
+    censor_time <- runif(n, 0, U)
+    observed_time <- pmin(true_time, censor_time)
+    status <- as.numeric(true_time <= censor_time)
+    mean(status == 0) - censor_rate  
+  }
+
+  upper <- uniroot(get_censor_upper_bound, interval = c(0.01, max(true_time)*2))$root
+
+  censor_time <- runif(n, 0, upper)
+  observed_time <- pmin(true_time, censor_time)
+  status <- as.numeric(true_time <= censor_time)
+
+  tibble(
+    time = observed_time,
+    status = status,
+    censor_rate = censor_rate
+  )
+}
+```
+
+
+```{r}
+set.seed(567)
+df_all_3 <- map_dfr(c(0.1, 0.3, 0.5), ~yysfun_censored_u(200, .x) |> 
+                    mutate(target = .x))
+
+df_all_3 |> 
+  group_by(target) |> 
+  summarise(actual_censoring = mean(status == 0))
+```
+
+### res
+
+```{r}
+km_fit_3 <- survfit(Surv(time, status) ~ censor_rate, data = df_all_3)
+```
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 8
+ggsurvplot(
+  km_fit_3,
+  data = df_all_3,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  surv.median.line = "hv",
+  palette = c("#64B250", "#1A4486", "#DA3B21")
+)
+```
+
+
+## 不同删失比例对 K-M 的影响
+
+- KM 曲线在尾部波动较大或提前终止
+
+- 高删失比例时候, risk group 快速减小(可用的未删失数据减少), 阶梯形更明显
+
+- S(t) 估计不稳定了, 区间变宽
+
+
+
+
+## 关于不同控制 censored 比例方法的讨论
+
+我们在前面使用了 分位数来精确控制删失比例, 但是这是一个定值, 不符合实际
+
+所以我们加上了一个来自均匀分布的随机扰动
+
+
+**Compare**
+
+- `censor_time <- runif(n, 0, max(true_time) / censor_rate)`
+
+    - 这种方法会很依赖上限, 结合后面控制删失比例是间接的
+    
+        - 因为删失发生与否取决于 `true_time <= censor_time`
+    
+    - 尤其我们前面是指数分布, 会偏的更多; 依赖 max(true_time)
+    
+    - 与比例的映射是不直接的
+    
+    - 可以加一个对上限的校正~ 去迭代或者反解~
+    
+
+- `quantile(true_time, probs = 1 - censor_rate)` 
+
+    - 分位数方法利用 true_time 的分布特性, 直接确定 q, 使得 P(true_time>q) = censor_rate
+
+    - 单纯 quantile 是固定时点删失了, 不是随机删失
+    
+    - 可能会截断
+    
+
+- 这两者事实上适用于不同场景
+
+    - quantile 适合研究终止了(随访结束)
+    
+    - runif 适合期间, 而且分布均匀平滑~
+
+
+***
+
+
+# T3
+
+Bootstrap 估区间, 要讲的一些东西
+
+- Bootstrap 原理(重抽样 + 分位数), 这也解释了为什么他通吃
+
+- 在估计 KM 区间的应用
+
+- 优劣 相较于 Greenwood (table)
+
+
+## simu data
+
+- T 指数分布 + 30% censored (independent, random and non-informative)
+
+```{r}
+set.seed(567)
+n <- 200
+df_surv <- tibble(
+  time = rexp(n, rate = 0.1), 
+  event = rbinom(n, 1, 0.7)   
+)
+```
+
+- same as `rweibull(n, shape = 1)`
+
+- Exponential is a special case of the Weibull distribution.
+
+
+
+## bs
+
+- bs 核心就是有放回抽样, 然后取分位数
+
+    - `map` 迭代, 之前给大家展示过一次
+
+```{r}
+yysfun_bs_km <- function(data, n_bs) {
+  bs_res <- map_dfr(1:n_bs, ~ {
+    # 抽
+    boot_data <- slice_sample(data, n = nrow(data), replace = T)
+    # 抽一次拟合一次
+    km_fit <- survfit(Surv(time, event) ~ 1, data = boot_data)
+    
+    tibble(time = km_fit$time,
+           surv = km_fit$surv,
+           boot_id = .x)
+  })
+  
+  bs_ci <- bs_res |> 
+    group_by(time) |> 
+    summarise(
+      lower_bs = quantile(surv, 0.025, na.rm = T),
+      upper_bs = quantile(surv, 0.975, na.rm = T),
+      .groups = "drop"
+    )
+  bs_ci
+}
+```
+
+
+```{r}
+boot_ci <- yysfun_bs_km(df_surv, 1000)
+
+boot_ci |> head()
+```
+
+## original
+
+```{r}
+km_fit_ori <- survfit(Surv(time, event) ~ 1, data = df_surv)
+
+km_ori <- tibble(
+  time = km_fit_ori$time,
+  surv = km_fit_ori$surv,
+  lower_gw = km_fit_ori$lower,
+  upper_gw = km_fit_ori$upper
+)
+```
+
+## res
+
+```{r}
+list(
+  boot_ci,
+  km_ori
+) |> 
+  reduce(inner_join, by = "time") |> 
+  pivot_longer(
+    cols = c(lower_bs, upper_bs, lower_gw, upper_gw),
+    names_to = c(".value", "methods"),
+    names_pattern = "(lower|upper)_(bs|gw)"
+  ) |> 
+  mutate(methods = factor(methods, 
+                          levels = c("bs", "gw"), 
+                          labels = c("Bootstrap", "Greenwood"))) |> 
+  ggplot(aes(time, surv)) +
+  geom_step(linewidth = 1) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = methods), 
+              alpha = 0.4) + 
+  scale_fill_lancet() + 
+  labs(x = "Time (days)", 
+       y = "Survival Probability", 
+       fill = "95% CI methods") + 
+  theme_classic() + 
+  theme(legend.position = c(0.8, 0.8), 
+        legend.text = element_text(size = 15),
+        legend.title = element_text(size = 15), 
+        axis.text = element_text(size = 14), 
+        axis.title = element_text(size = 14))
+```
+
+
+
