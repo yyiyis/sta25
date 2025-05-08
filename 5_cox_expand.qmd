@@ -1,0 +1,889 @@
+---
+title: "5_cox_expand"
+author: "YYS"
+date: "2025-5-6"
+toc: true
+number-sections: true
+format:
+  html:
+    theme: litera
+    df-print: kable
+---
+
+```{r setup}
+#| include: false
+knitr::opts_chunk$set(warning = F, message = F, dpi = 300)
+```
+
+```{r}
+#| include: false
+rm(list = ls())
+```
+
+```{r}
+options(scipen = 200)
+```
+
+------------------------------------------------------------------------
+
+1.  终点事件重复发生的生存模型
+
+2.  竞争风险模型
+
+3.  混杂的前世今生
+
+------------------------------------------------------------------------
+
+# load packages
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(gtsummary)
+library(survival)
+library(survminer)
+library(frailtypack)
+library(DataExplorer)
+library(ggsci)
+library(cmprsk)
+library(tidycmprsk)
+library(ggsurvfit)
+library(mstate)
+```
+
+# Recurrent event
+
+## basic infor
+
+------------------------------------------------------------------------
+
+同一个体, 在观察期间, **多次发生**结局事件 (疾病复发, 多次入院, 感染, 跌倒 )
+
+-   repeat and alive (not terminal)
+
+-   vs 之前的 K-M 或 Cox, 以前关注一次(首次) event
+
+-   因为是同一个体, 所以事件之间会有相关性
+
+-   两个 time:
+
+    -   总时间(累积 time, total time, from baseline)
+
+    -   间隔时间(Gap time, from last time)
+
+    -   还有用 日历时间 来玩的
+
+------------------------------------------------------------------------
+
+**一些常用的 model**
+
+-   Andersen-Gill (AG)
+
+    -   假设每次 event 之间独立 iid (所以强相关的时候没法弄)
+
+    -   使用每次的起止时间, 日历时间
+
+-   Prentice-Williams-Peterson (PWP)
+
+    -   考虑 event 先后顺序, 每一级风险集只包含“已发生n次”的人
+
+    -   GT: Gap time, 从上一次开始, 且都移动到起点去
+
+    -   TT: total time, 从基线开始
+
+-   Wei-Lin-Weissfeld (WLW)
+
+    -   each event 也视为独立, 用边际结局
+
+    -   为每个事件顺序拟合单独的 Cox (所以相当于不考虑顺序)
+
+    -   稳健标准误(允许个体之间相关)
+
+    -   直观
+
+    -   额外的数据格式
+
+-   Frailty
+
+    -   加入随机效应, 考虑异质性
+
+------------------------------------------------------------------------
+
+## simul data
+
+-   更建议那真实世界实践数据来玩, 我手里没有, 所以就还是模拟了
+
+-   注意数据结构
+
+-   下面是 R 里面 自带的数据集
+
+膀胱癌复发数据 to demonstrate methodology for recurrent event modelling.
+
+-   Bladder1
+
+    -   full dataset
+
+    -   三种治疗方案, 所有118名受试者的复发信息
+
+    -   观察到的最大复发次数为9次(有一个10次的)
+
+-   Bladder
+
+    -   仅包含85名有随访记录且被分配至硫代替泊（thiotepa）或安慰剂组的受试者
+
+    -   并且对每位患者最多只保留前四次复发事件
+
+    -   status 1: 复发, 0: 其他情况(包括因任何原因死亡)
+
+    -   该数据集采用了Wei、Lin 和 Weissfeld (WLW) 提出的“竞争风险”格式进行整理
+
+-   Bladder2
+
+    -   同 Bladder subset
+
+    -   formatted in the (start, stop\] or Anderson-Gill style
+
+    -   Note that a issue in transforming from the WLW to the AG style data set
+
+        -   `?bladder` for detail
+
+```{r}
+data("bladder")
+```
+
+------------------------------------------------------------------------
+
+-   **bladder1**
+
+    -   treatment 治疗: Placebo, pyridoxine (vitamin B6), or thiotepa
+
+    -   number 初始数量: Initial number of tumours (8=8 or more)
+
+    -   size 初始大小 of 最大的那个: Size (cm) of largest initial tumour
+
+    -   recur 复发次数: Number of recurrences
+
+    -   start,stop 两个时间: The start and end time of each time interval
+
+    -   status 结局: End of interval code, 0=censored, **1=recurrence**, 2=death from bladder disease, 3=death other/unknown cause
+
+    -   rtumor 某次复发的数量: Number of tumors found at the time of a recurrence
+
+    -   rsize 最大的 size : Size of largest tumor at a recurrence
+
+    -   enum 总时间数: Event number (observation number within patient)
+
+**看一下bladder1 的数据格式, 观察一下 recurrent 是怎么表示的**
+
+```{r}
+bladder1 |> 
+  glimpse()
+```
+
+这个数据集里面发生 `2=death from bladder disease` 的很少, 只有2个
+
+```{r}
+bladder1 |> 
+  filter(id %in% c(5, 6, 10, 14)) 
+```
+
+------------------------------------------------------------------------
+
+-   **bladder1**
+
+    -   rx: Treatment 1=placebo 2=thiotepa
+
+    -   number: Initial number of tumours (8=8 or more)
+
+    -   size: size (cm) of largest initial tumour
+
+    -   stop: recurrence or censoring time
+
+    -   enum: which recurrence (up to 4)
+
+```{r}
+bladder |> head(12)
+```
+
+------------------------------------------------------------------------
+
+-   **bladder2**
+
+    -   rx: Treatment 1=placebo 2=thiotepa
+
+    -   number: Initial number of tumours (8=8 or more)
+
+    -   size: size (cm) of largest initial tumour
+
+    -   start: start of interval (0 or previous recurrence time)
+
+    -   stop: recurrence or censoring time
+
+    -   enum: which recurrence (up to 4)
+
+```{r}
+#| eval: false
+bladder2 |> view()
+```
+
+```{r}
+bladder2 |> 
+  filter(id %in% c(7:9)) 
+```
+
+------------------------------------------------------------------------
+
+## modelling
+
+```{r}
+#| eval: false
+bladder2 |> glimpse()
+bladder2 |> view()
+```
+
+### desc
+
+**1. 在 model 之前, 描述是不可少的**
+
+```{r}
+#| eval: false
+bladder1 |> view()
+```
+
+当然这里有一个小细节是说, 这些被重复记录的 id, 去 distinct 就好了
+
+```{r}
+n_distinct(bladder$id)
+
+bladder |> 
+  distinct(id, rx) |> 
+  count(rx)
+
+bladder |> 
+  distinct(id, .keep_all = T) |> 
+  summarise(
+    mean_number = mean(number),
+    median_number = median(number),
+    mean_size = mean(size),
+    median_size = median(size)
+  )
+```
+
+then 这里我们仅使用第一次事件绘制 KM 曲线
+
+```{r}
+#| fig-width: 8
+#| fig-height: 8
+bladder_first <- bladder2 |> filter(enum == 1)
+
+fit_km <- survfit(Surv(stop, enum > 0) ~ rx, data = bladder_first)
+
+ggsurvplot(fit_km, data = bladder_first,
+           conf.int = T, risk.table = T,
+           palette = c("#1A4486", "#DA3B21"), 
+           legend.labs = c("Placebo", "Thiotepa"),
+           title = "Time to First Recurrence (KM Estimate)")
+```
+
+### fit_first
+
+```{r}
+fit_first <- coxph(Surv(stop, event = (enum > 0)) ~ rx + number + size, 
+                   data = bladder_first)
+
+fit_first |> summary()
+```
+
+**note:**
+
+注意一个细节: `enum > 0` (防御式写法，确保逻辑正确)
+
+-   这个在仅使用第一次 time 时候看不出来作用, 后面建模时候就能看出来了
+
+-   事实上, 这是一个约定性规范写法, 来强调事件定义
+
+-   `Surv(start, stop, event = ...)` 里面, event 应是0/1变量, indicating 该区间结束时是否发生了**终点事件(如复发)**
+
+    -   被处理过的`bladder2`中每行都表示一个 recurrence, 但并没有显式的 `status`变量
+
+        -   `bladder2 |> mutate(event = 1)`
+
+    -   如果只写 `event = enum`, 那就是 1, 2, 3, 4，会被错误识别为“死亡”或“多级事件”；
+
+    -   用 (enum \> 0) 是一种方式来生成一个 0/1 的逻辑变量 (`enum > 0 == TRUE`), 告诉模型这条记录是否是一次复发(始终为 1)
+
+------------------------------------------------------------------------
+
+### fit_AG
+
+**2. 这里我们用了 Andersen-Gill (AG) model**
+
+第二个细节: `cluster(id)`
+
+-   用了robust sandwich variance estimate
+
+-   Sanwich 在二项分布出现 *overdispersion* 时候也用的很多
+
+```{r}
+fit_AG <- coxph(Surv(start, stop, event = (enum > 0)) ~ rx + number + size + cluster(id),
+                data = bladder2)
+
+fit_AG |> summary()
+```
+
+```{r}
+bladder2 <- bladder2 |> mutate(event = 1)
+fit_ag <- coxph(Surv(start, stop, event) ~ rx + number + size + cluster(id),
+                data = bladder2)
+
+fit_ag |> summary()
+```
+
+```{r}
+yysfun_ORCIP <- function(model) {
+  model |>
+    tidy() |>
+    mutate(
+      HR = exp(estimate),
+      lower = exp(estimate - 1.96 * robust.se),
+      upper = exp(estimate + 1.96 * robust.se),
+      CI = sprintf("%.2f (%.2f, %.2f)", HR, lower, upper), 
+      P = case_when(p.value < 0.001 ~ "< 0.001", 
+                    T ~ sprintf("%.3f", p.value))
+      )|>
+    dplyr::select(Variable = term, CI, P, 
+                  HR, lower, upper)
+}
+```
+
+```{r}
+#| eval: false
+yysfun_ORCIP(fit_AG)
+```
+
+**3. 使用其他 model**
+
+-   AG 是有一些 assumption 的(视为独立, 且没法搞顺序), 但是在现实中未必能被满足
+
+### fit_PWP
+
+-   PWP 考虑时间顺序和依赖, 所以是条件模型
+
+-   核心是 `strata(enum)` 按照事件编号分层
+
+a.  total time
+
+```{r}
+fit_PWP_TT <- coxph(Surv(start, stop, event) ~ 
+                      rx + number + size + strata(enum) + cluster(id),
+                    data = bladder2)
+fit_PWP_TT
+```
+
+b.  gap time
+
+两次事件之间的时间, 然后给拉回起点去
+
+```{r}
+bladder2_gap <- bladder2 |> 
+  mutate(gap_start = 0,
+         gap_stop = stop - start)
+
+fit_PWP_GT <- coxph(Surv(gap_start, gap_stop, event) ~
+                      rx + number + size + strata(enum) + cluster(id),
+                    data = bladder2_gap)
+fit_PWP_GT
+```
+
+### fit_WLW
+
+```{r}
+fit_WLW <- coxph(Surv(stop, enum > 0) ~
+                   rx + number + size + strata(enum) + cluster(id),
+                 data = bladder)
+fit_WLW
+```
+
+### fit_Frailty
+
+引入随机效应(frailty term)建模个体间异质性, 允许同一人重复事件之间有关联。
+
+```{r}
+fit_Frailty <- coxph(Surv(start, stop, event) ~
+                       rx + number + size + frailty(id), 
+                     data = bladder2)
+fit_Frailty
+```
+
+------------------------------------------------------------------------
+
+## res
+
+```{r}
+#| eval: false
+fit_AG |> yysfun_ORCIP() |> mutate(Model = "AG")
+fit_PWP_GT |> yysfun_ORCIP() |> mutate(Model = "PWP_GT")
+fit_PWP_TT |> yysfun_ORCIP() |> mutate(Model = "PWP_TT")
+fit_WLW |> yysfun_ORCIP() |> mutate(Model = "WLW")
+```
+
+```{r}
+yysfun_ORCIP2 <- function(model, model_name) {
+  model |>
+    tidy() |>
+    mutate(
+      HR = exp(estimate),
+      lower = exp(estimate - 1.96 * robust.se),
+      upper = exp(estimate + 1.96 * robust.se),
+      CI = sprintf("%.2f (%.2f, %.2f)", HR, lower, upper), 
+      P = case_when(p.value < 0.001 ~ "< 0.001", 
+                    TRUE ~ sprintf("%.3f", p.value)),
+      Model = model_name
+    ) |>
+    dplyr::select(Model, Variable = term, CI, P, 
+                  HR, lower, upper)
+}
+```
+
+```{r}
+models <- list(fit_AG, fit_PWP_GT, fit_PWP_TT, fit_WLW)
+names <- c("AG", "PWP_GT", "PWP_TT", "WLW")
+
+res_4 <- map2_dfr(models, names, yysfun_ORCIP2)
+```
+
+------------------------------------------------------------------------
+
+```{r}
+yysfun_ORCIP3 <- function(model) {
+  model |>
+    tidy() |>
+    mutate(
+      HR = exp(estimate),
+      lower = exp(estimate - 1.96 * std.error),
+      upper = exp(estimate + 1.96 * std.error),
+      CI = sprintf("%.2f (%.2f, %.2f)", HR, lower, upper), 
+      P = case_when(p.value < 0.001 ~ "< 0.001", 
+                    T ~ sprintf("%.3f", p.value))
+      )|>
+    dplyr::select(Variable = term, CI, P, 
+                  HR, lower, upper)
+}
+```
+
+```{r}
+final_res <- rbind(
+  fit_first |> yysfun_ORCIP3() |>
+    mutate(Model = "First", .before = 1),
+  
+  res_4,
+  fit_Frailty |> yysfun_ORCIP3() |>
+    filter(Variable != "frailty(id)") |> 
+    mutate(Model = "Frailty", .before = 1)
+)
+final_res |> 
+  dplyr::select(Model, Variable,  `HR (95% CI)` = CI, P)
+```
+
+```{r}
+final_res |> 
+  mutate(Model = fct_relevel(Model, "First")) |> 
+  ggplot(aes(x = Variable, y = HR, color = Model)) + 
+  geom_point(size = 2, 
+             position = position_dodge(width = 0.8)) + 
+  geom_errorbar(aes(ymin = lower, 
+                    ymax = upper), 
+                width = 0.6, 
+                size = 1, 
+                position = position_dodge(width = 0.8)) + 
+  scale_color_lancet() + 
+  labs(x = NULL, y = "HR (95% CI)") + 
+  theme(axis.title = element_text(size = 14), 
+        axis.text = element_text(size = 14), 
+        legend.title = element_text(size = 14), 
+        legend.text = element_text(size = 12), 
+        # legend.position = c(0.15, 0.3)
+        )
+```
+
+------------------------------------------------------------------------
+
+# Competing risk
+
+## note
+
+需要做模拟, 讲清楚 CIF, FG, 以及 MS 里面具体在干什么事情
+
+这也是为什么他们能够处理 competing risk
+
+
+## basic infor
+
+竞争风险(多个**互斥**事件): 死于其他; only one can happen first
+
+而传统的 Cox 只关心一个终点事件
+
+现实中, 研究对象会因多种原因(竞争风险)退出观察, 这些原因之间也会相互影响
+
+-   竞争发生(互斥), 会影响(阻止)其他事件发生
+
+    -   信息删失, **影响目标事件生存概率估计**
+
+-   而传统 Cox 假设其他事件不影响目标事件发生(概率)
+
+-   举个🌰
+
+    -   目标事件: cancer death
+
+    -   competing event: death of other disease or loss to follow-up
+
+    -   这时候如果直接用K-M估计生存率, 将其他事件都视为 censored, 会
+
+        -   高估/低估? (看后面的例子)
+
+        -   why: censored 改变了后面事件发生的概率
+
+**核心处理**:
+
+正确估计 specific event 的 Cumulative Incidence Function (CIF), 同时考虑 event 之间的相互作用
+
+1.  CIF
+
+在时间 t 之前, 某特定 event 发生的概率
+
+$$CIF_k(t) = P(T \leq t, D = k) \tag{1}$$
+
+-   D = k 表示特定 event
+
+-   所有 event 的 CIF 加起来 $\leq 1$
+
+
+2.  Cause-Specific Hazard
+
+这个同之前Cox的 $h_k(t)$
+
+
+***
+
+**常用的 model**
+
+-   Fine-Gray (这个在论文里面也很常用) based on Subdistribution
+
+    - 协变量 subdistribution hazard ratio, SHR, 类似于 Cox 里面的 PH (不随时间变化)
+    
+        - 可以看残差, 或者协变量与时间的交互项, 或者看CIF 曲线 (很类似 Cox 里面的做法)
+        
+    - 需要正确指定所有竞争事件(不要遗漏或错分), 且事件之间互斥
+    
+    - 其他的模型假设同之前(独立删失, 充分事件数, 共线性等等)
+    
+    - 直接对特定事件建模
+
+-   Cause-specific Cox
+
+    - 这个就是单个结局分别去做了
+
+-   Aalen-Johansen or Multi-State Model
+
+
+
+**note**: a new package published in Aug, 2024 named `tidycmprsk`
+
+-   wraps the `cmprsk` package
+
+-   However, the time interaction features available in `cmprsk::crr()` is not available in `tidycmprsk`
+
+## simu data
+
+
+`tidycmprsk::trial`: A dataset containing the baseline characteristics of 200 patients who received Drug A or Drug B. Dataset also contains the outcome of tumor response to the treatment.
+
+```{r}
+df <- tidycmprsk::trial
+df |> glimpse()
+```
+
+### desc
+
+5% 以下的缺失可以不处理 (当然也可以搞掉)
+
+```{r}
+df |> plot_missing()
+```
+
+```{r}
+df |> count(death_cr)
+```
+
+```{r}
+df |> 
+  mutate(death_cr = fct_relevel(death_cr, 
+                                "death from cancer", 
+                                "death other causes", 
+                                "censor")) |> 
+  tbl_summary(by = death_cr, 
+              digits = all_continuous() ~ 2,
+              missing = "no") |> 
+  add_overall() |> 
+  modify_footnote(all_stat_cols() ~ "Mean (SD); Median (P25, P75); n (%)") |> 
+  modify_caption("Table 1. Basic character") |> 
+  bold_labels() 
+```
+
+## CIF
+
+-   全人群的结果
+
+因为有两个竞争风险, 所以会有两个 tables here
+
+
+```{r}
+fit1 <- cuminc(Surv(ttdeath, death_cr) ~ 1, df)
+fit1
+```
+
+```{r}
+fit1 |> 
+  tbl_cuminc(times = c(12, 24),
+             label_header = "**Month {time}**") 
+```
+
+```{r}
+fit1 |> 
+  tbl_cuminc(times = c(12, 24),
+             outcomes = c("death from cancer", "death other causes"),
+             label_header = "**Month {time}**") 
+```
+
+-   我们拿 treatment 分层来看
+
+```{r}
+fit2 <- cuminc(Surv(ttdeath, death_cr) ~ trt, df)
+fit2
+```
+
+-   `add_p()` Add column with p-value comparing incidence across stratum
+
+```{r}
+fit2 |> 
+  tbl_cuminc(times = c(12, 24),
+             label_header = "**Month {time}**") |> 
+  add_p() |> 
+  modify_header(p.value ~ "*P*") 
+```
+
+```{r}
+fit2 |> 
+  tbl_cuminc(times = c(12, 24),
+             outcomes = c("death from cancer", "death other causes"),
+             label_header = "**Month {time}**") |> 
+  add_p() |> 
+  add_nevent() |> 
+  add_n() |> 
+  modify_header(p.value ~ "*P*") 
+```
+
+```{r}
+fit2 |> 
+  ggcuminc(outcome = "death from cancer") +
+  add_confidence_interval() +
+  add_risktable() +
+  scale_ggsurvfit(x_scales = list(breaks = seq(0, 24, by = 6))) + 
+  scale_color_lancet() + 
+  scale_fill_lancet() + 
+  theme(legend.position = c(0.2, 0.8))
+```
+
+```{r}
+fit2 |> 
+  ggcuminc(outcome = c("death from cancer", "death other causes")) +
+  add_risktable() +
+  scale_ggsurvfit(x_scales = list(breaks = seq(0, 24, by = 6))) + 
+  scale_color_lancet() + 
+  scale_fill_lancet() + 
+  theme(legend.position = c(0.2, 0.7))
+```
+
+-   using the survival multi-state model
+
+```{r}
+survfit2(Surv(ttdeath, death_cr) ~ trt, df) |> 
+  ggcuminc(outcome = "death from cancer") +
+  add_confidence_interval() +
+  add_risktable() +
+  scale_ggsurvfit(x_scales = list(breaks = seq(0, 24, by = 6))) + 
+  scale_color_lancet() + 
+  scale_fill_lancet() + 
+  theme(legend.position = c(0.2, 0.7))
+```
+
+
+***
+
+## modelling with FG
+
+稍微讲一点点原理, 不然直接拿模型来跑了, 但是里面在干啥啊
+
+- 竞争风险影响其他(非信息删失)后续时间发生的概率
+
+- 核心是构建 CIF, 通过 subdistribution hazard 分析协变量的效应
+
+
+$$CIF_k(t) = P(T \leq t, D = k)\tag{1}$$
+
+在给定时间 t, 个体发生事件 k 的瞬时风险, 同时考虑了因竞争事件退出但仍在“风险中”的个体(加权)
+
+
+**传统 Cox**
+
+- 关注事件 k 的瞬时风险, 仅仅考虑未发生任何事件的个体
+
+$$h_k(t) = \lim_{\Delta t \to 0} \frac{P(t \leq T < t + \Delta t, D = k \mid T \geq t)}{\Delta t}\tag{2}$$
+
+**FG**
+
+- 风险集
+
+    - 未发生任何事件的个体 ($T \geq t$) 
+    
+    - 已因竞争事件退出 ($D \neq k$) 但仍然“在风险中”的个体
+    
+
+Subdist. risk function
+
+$$ h_k^{sub}(t) = \lim_{\Delta t \to 0} \frac{P(t \leq T < t + \Delta t, D = k \mid T \geq t \text{ or } (T < t, D \neq k))}{\Delta t} \tag{3}$$
+
+
+
+$$h_k^{sub}(t | X) = h_{k0}^{sub}(t) \exp(\beta X) \tag{4}$$
+
+与 CIF 的关系
+
+- 协变量对应 $\beta$ 影响 subdist. 而改变 CIF
+
+$$ CIF_k(t | X) = 1 - \exp\left(-\int_0^t h_k^{sub}(u | X) \, du\right) \tag{5}$$
+
+FG 通过动态调整风险集, 直接估计CIF, 直观好解释
+
+
+**加权的原理**
+
+$$w_i(t) = \frac{G(t)}{G(T_i)} \tag{6}$$
+
+- $w_i(t)$ 个体 i 在时间 t 的权重
+
+- $G(t) = P(T > t)$ 总体生存函数，表示在时间 t 之前未发生任何事件的概率
+
+- $T_i$ 个体 i 发生竞争事件的时间  $T_i < t$
+
+- $T_i < t, D \neq k$ 时候权重生效
+
+回到了 $\tag{3}$里面
+
+- 加权机制确保已因竞争事件退出的个体对目标事件(事件k)的亚分布风险仍有贡献, 反映其“潜在风险”
+
+- 表示个体 i 在退出时间$T_i$ 后继续留在风险集的相对概率
+
+- 权重随时间 t 递减, 因为 G(t) 随时间减小, 反映个体对后续风险的贡献逐渐降低
+
+
+**相较于 Cox**
+
+- FG 通过加权保留已退出个体, 而 Cox 仅考虑了 $T \geq t$ 的个体
+
+
+***
+
+```{r}
+fit_crr <- crr(Surv(ttdeath, death_cr) ~ trt + age, df)
+fit_crr
+```
+
+```{r}
+fit_crr |> tidy()
+```
+
+```{r}
+fit_crr |> 
+  tbl_regression(exponentiate = T) |> 
+  modify_header(p.value ~ "*P*") |>  
+  add_n(location = "level")
+```
+
+## modelling with Cause-specific Cox
+
+```{r}
+fit_cox1 <- coxph(Surv(ttdeath, death_cr == "death from cancer") ~ trt + age, 
+                  df)
+fit_cox1
+```
+
+```{r}
+fit_cox2 <- coxph(Surv(ttdeath, death_cr == "death other causes") ~ trt + age, 
+                  df)
+fit_cox2
+```
+
+
+***
+
+## modelling with Multi-State Model
+
+多个事件发生的路径和转换过程, 如: 入组 到 复发 到死亡
+
+Status → Transitions → Transition Hazard
+
+- 某些预后因素如何影响不同阶段
+
+- 预测
+
+**原理**
+
+- 状态之间的转移风险 $h_{ij}(t)$ 与转移概率 $P_{ij}(s, t)$
+
+- 风险集基于当前状态
+
+
+
+
+**转移风险函数**
+
+$$h_{ij}(t) = \lim_{\Delta t \to 0} \frac{P(t \leq T < t + \Delta t, Stasus_j \mid T \geq t, Stasus_i)}{\Delta t} \tag{7}$$
+
+
+**转移概率**
+
+$$P_{ij}(s, t) = P(Stasus_j \text{ at } t \mid Stasus_i \text{ at } s) \tag{8}$$
+
+
+**多状态模型**
+
+$$h_{ij}(t | X) = h_{ij0}(t) \exp(\beta_{ij} X) \tag{9}$$
+
+
+
+```{r}
+# Define transition matrix
+tmat <- matrix(NA, 3, 3)
+tmat[1, 2:3] <- 1:2 # Healthy → Disease (1), Healthy → Death (2)
+tmat[2, 3] <- 3     # Disease → Death (3)
+dimnames(tmat) <- list(
+  from = c("healthy", "disease", "death"),
+  to = c("healthy", "disease", "death")
+)
+tmat
+```
+
+
+
+
+
+***
+
+# Confounding related
+
+EPI 那本书上面的一个图和例子
+
+![P197. Table 5-8: Hypothetical examples of unadjusted and adjusted relative risks according to type of confounding (positive or negative).](P197_T5_7.png)
+
+![P199. Table 5-9: Directions of the associations of the confounder with the exposure and the outcome](P197_T5_8.png)
