@@ -1,0 +1,35 @@
+---
+title: "7_bayes_discriminate"
+author: "YYS"
+date: "2025-5-19"
+toc: true
+number-sections: true
+format:
+  html:
+    theme: litera
+    df-print: kable
+---
+
+```{r setup}
+#| include: false
+knitr::opts_chunk$set(warning = F, message = F, dpi = 300)
+```
+
+```{r}
+rm(list = ls())
+```
+
+```{r}
+options(scipen = 200)
+```
+
+
+# load packages and data
+
+```{r}
+library(tidyverse)
+```
+
+
+
+

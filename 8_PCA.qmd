@@ -1,0 +1,152 @@
+---
+title: "8_PCA"
+author: "YYS"
+date: "2025-5-31"
+toc: true
+number-sections: true
+format:
+  html:
+    theme: litera
+    df-print: kable
+---
+
+```{r setup}
+#| include: false
+knitr::opts_chunk$set(warning = F, message = F, dpi = 300)
+```
+
+```{r}
+rm(list = ls())
+```
+
+```{r}
+options(scipen = 200)
+```
+
+# load packages and data
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(psych)
+```
+
+
+
+```{r}
+data <- read_excel("~/Desktop/r4ds/stahomework/M_25_sta/n8_PCA/data_p191.xlsx")
+```
+
+# using corr
+
+```{r}
+dt <- data |>
+  mutate(across(c(x1:x10), as.double)) |> 
+  select(-ID) |> 
+  scale() |> 
+  as.matrix()
+
+cor_data <- dt |> 
+  cor(use = "pairwise.complete.obs")
+
+eigen_data <- eigen(cor_data)
+eigen_data
+```
+
+
+## 方差贡献率
+
+```{r}
+variance <- tibble(
+  eigenvalue = eigen_data$values,
+  Proportion_of_Variance = eigenvalue / sum(eigenvalue),
+  Cumulative_Proportion = cumsum(Proportion_of_Variance)
+  ) |> 
+  mutate(PC = c(1:length(eigenvalue))) |> 
+  dplyr::select(PC, everything())
+```
+
+
+```{r}
+#| tbl-cap-location: top
+#| tbl-cap: "Table S1: Eigenvalue and variance Proportion"
+variance |> 
+  mutate(Proportion_of_Variance = Proportion_of_Variance * 100, 
+         Cumulative_Proportion = Cumulative_Proportion * 100, 
+         eigenvalue = sprintf("%.3f", eigenvalue), 
+         Proportion_of_Variance = sprintf("%.2f", Proportion_of_Variance), 
+         Cumulative_Proportion = sprintf("%.2f", Cumulative_Proportion), 
+         ) |> 
+  rename(Eigenvalue = eigenvalue, 
+         `Proportion of Variance (%)` = Proportion_of_Variance, 
+         `Cumulative Proportion (%)` = Cumulative_Proportion)
+```
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+fa.parallel(cor_data, fa = "both")
+```
+
+## loading and PC_score
+
+```{r}
+eigen_vector <- as.matrix(eigen_data$vectors)
+PC_score <- dt %*% eigen_vector
+colnames(PC_score) <- c(paste("PC", c(1:10), sep = "")) 
+
+
+
+pcloading_2 <- cor(data.frame(PC_score[, 1:2], data |>
+                                mutate(across(
+                                  c(x1:x10), as.double
+                                )) |>
+                                select(-ID)), use = "pairwise.complete.obs")[-(1:2), 1:2]
+pcloading_2
+```
+
+
+
+```{r}
+yysfun_loading <- function(data){
+  data |> as.data.frame() |> 
+    mutate(variable_ori = row.names(data)) |> 
+    pivot_longer(
+      cols = c(starts_with("PC")), 
+      names_to = "PC", 
+      values_to = "value"
+    ) |> 
+    mutate(variable_ori = fct_relevel(variable_ori, 
+                                    paste0("x", 1:10))) |> 
+    ggplot(aes(PC, variable_ori))+
+    geom_tile(aes(fill = value))+
+    scale_fill_viridis_c() +
+    labs(x = NULL, y = NULL)
+}
+```
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+yysfun_loading(pcloading_2)
+```
+
+
+
+
+```{r}
+pcloading_3 <- cor(data.frame(PC_score[, 1:3], data |>
+                                mutate(across(
+                                  c(x1:x10), as.double
+                                )) |>
+                                select(-ID)), use = "pairwise.complete.obs")[-(1:3), 1:3]
+pcloading_3
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+yysfun_loading(pcloading_3)
+```

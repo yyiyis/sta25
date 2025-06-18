@@ -1,0 +1,446 @@
+---
+title: "6_cluster"
+author: "YYS"
+date: "2025-5-6"
+toc: true
+number-sections: true
+format:
+  html:
+    theme: litera
+    df-print: kable
+---
+
+```{r setup}
+#| include: false
+knitr::opts_chunk$set(warning = F, message = F, dpi = 300)
+```
+
+```{r}
+#| include: false
+rm(list = ls())
+```
+
+```{r}
+options(scipen = 200)
+```
+
+$$PAF = \frac{RR - 1}{RR}$$
+
+
+***
+
+
+1. 系统聚类和K-Means聚类, 当变量高度相关时该如何处理?
+
+**影响:** 
+
+- 距离计算, 距离矩阵失真
+
+- 信息冗余 (被过度加权) (尤其选 average 或 complete 的 linkage 时候)
+
+**处理**
+
+- 手动去除(保留更重要的) (给一个相关系数阈值或者 VIF)
+
+- 降维, 走后面的 PCA
+
+- 换个距离
+
+    - 系统聚类时候可以用 马氏距离(可以处理相关性)
+
+    - 基于相似性的非度量方法（如 Gower 距离 + PAM 聚类）
+
+- 特征加权 (基于专业知识)
+
+
+***
+
+2. 主讲两步聚类法并以例子贯穿
+
+
+**两步聚类**: 预聚类(预处理) + 正式聚类
+
+a. 预聚类: 序贯(**BIRCH**)粗分. 开始是一个大类(根节点), 读入一个数据, 算一下*亲疏程度*, 看是否需要派生新类, 还是合并到某个子类里面, 反复进行
+
+b. 聚类: 再根据亲疏程度, 看哪些子类可以合并 (类内差异不断增大)
+
+那么
+
+- 亲疏程度怎么算
+
+    - 欧式聚类 & 对数似然距离
+
+- 两步聚类每一步具体在做什么?
+
+    - BIRCH (要讲原理) 形成子类  (Clustering Feature Tree)
+    
+    - 对子类进行 hierarchical cluster
+
+***
+
+
+# load packages and data
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(gtsummary)
+library(GGally)
+library(psych)
+library(ggpubr)
+library(factoextra)
+library(prcr)
+library(cluster)
+library(factoextra)
+library(ggsci)
+```
+
+
+# T1
+
+```{r}
+data("USArrests")
+```
+
+
+这个是一个很经典的讲 cluster 的 dataset, 是1970年US的犯罪率(10万率)以及人口数
+
+里面本身有强相关(几种犯罪之间的相关, 这在专业上也讲的通)
+
+```{r}
+USArrests |> glimpse()
+```
+
+## description
+
+不要上来就跑模型, 一定要看一下数据本身的分布
+
+在临床实践中, 尤其要看数据本身是否有极端值等等~ (仅仅 table 1 不大能看出来有什么异常)
+
+```{r}
+USArrests |> 
+  tbl_summary(
+              # statistic = list(all_continuous() ~ "{mean} ({sd})"),
+              digits = all_continuous() ~ 2,
+              missing = "no") |> 
+  modify_footnote(all_stat_cols() ~ "Median (P25, P75)") |> 
+  modify_caption("Table 1. Basic character") |> 
+  bold_labels() 
+```
+
+
+```{r}
+USArrests |> ggpairs()
+```
+
+***
+
+我们先直接做两种聚类, 看看结果
+
+
+## hierarchical
+
+1. 第一件事情是标化, 度量衡等问题
+
+同时, 这个在某种程度上也能解决一点点强相关的问题
+
+```{r}
+df <- scale(USArrests) 
+df |> head()
+```
+
+2. 计算距离
+
+聚类这里普遍用欧式距离 `method = "euclidean"`
+
+```{r}
+result <- dist(df, method = "euclidean")
+```
+
+
+3. 选 linkage
+
+实际做的过程中, 我们会每个linkage 都来一遍, 看哪个效果好~
+
+当然 data 本身有明显分类时候, 不同 linkage 结果是很一致的
+
+- "single"(min)
+
+- "complete" (max)
+
+- "average" (= UPGMA) 类平均法（等权重算术平均）
+
+- "ward.D" 离差平方和 (Ward's minimum variance)
+
+- "ward.D2"
+
+- "median" (= WPGMC) 不等权重形心(中间距离)
+
+- "centroid" (= UPGMC) 等权重形心(重心法)
+
+- "mcquitty" (= WPGMA) 不等权重算术平均
+
+```{r}
+#| fig-height: 7
+#| fig-width: 10
+result_hc <- hclust(d = result, 
+                    method = "average")
+
+fviz_dend(
+  result_hc,
+  k = 2,
+  cex = 0.5,
+  k_colors = c("#2E9FDF", "#FC4E07"),
+  color_labels_by_k = T,
+  rect = T
+)
+```
+
+```{r}
+#| fig-height: 7
+#| fig-width: 10
+result_hc <- hclust(d = result, 
+                    method = "ward.D2")
+fviz_dend(result_hc, k = 4, 
+          cex = 0.5, 
+          k_colors = c("#2E9FDF", "#00AFBB", "#E7B800", "#FC4E07"),
+          color_labels_by_k = T, 
+          rect = T)
+```
+
+***
+
+## k-means
+
+这个结果其实很有意思, 一般随着 K 增加, wss 是单调的
+
+选择坡度变化不明显的点最为最佳聚类数目 (这里选4, 也可以继续拿 3, 5 做敏感性分析)
+
+```{r}
+fviz_nbclust(df, kmeans, method = "wss") + 
+  geom_vline(xintercept = 4, linetype = 2)
+```
+
+
+```{r}
+set.seed(123)
+km_result <- kmeans(df, 4)
+km_result
+```
+
+```{r}
+fviz_cluster(
+  km_result,
+  data = df,
+  ellipse.type = "euclid",
+  # geom = "point",
+  palette = "lancet",
+  star.plot = T, 
+  repel = T,
+  ggtheme = theme_bw()
+)
+```
+
+```{r}
+df_cluster <- df |> 
+  as.data.frame() |> 
+  rownames_to_column() |> 
+  mutate(cluster = km_result$cluster)
+```
+
+```{r}
+yysfun_anova <- function(x){
+  aov <- aov(x ~ cluster, data = df_cluster)
+  aov |>
+    tidy() |>
+    mutate(
+      p.value = case_when(p.value < 0.001 ~ "< 0.001", 
+                          !is.na(p.value) ~ sprintf("%.3f", p.value)),
+      statistic = case_when(!is.na(statistic) ~ sprintf("%.3f", statistic)),
+      sumsq = sprintf("%.3f", sumsq),
+      meansq = sprintf("%.3f", meansq)
+    ) |>
+    rename(SS = sumsq,
+           MS = meansq,
+           `F` = statistic,
+           P = p.value)
+}
+```
+
+
+```{r}
+map(df_cluster |> select(Murder:Rape), yysfun_anova) |>
+  data.table::rbindlist(idcol = "term")
+```
+
+```{r}
+df_cluster |> 
+  pivot_longer(cols = c(Murder:Rape), 
+               names_to = "variable", 
+               values_to = "value") |> 
+  ggplot(aes(variable, value, color = factor(cluster))) + 
+  geom_boxplot() + 
+  scale_color_lancet()
+```
+
+```{r}
+df_cluster |> 
+  pivot_longer(cols = c(Murder:Rape), 
+               names_to = "variable", 
+               values_to = "value") |> 
+  ggplot(aes(factor(cluster), value, color = factor(cluster))) + 
+  geom_boxplot() + 
+  scale_color_lancet() + 
+  facet_wrap( ~ variable, scales = "free") + 
+  theme(legend.position = "none") +
+  labs(x = "Cluster")
+```
+
+还有一个小操作
+
+```{r}
+df_cluster |> 
+  group_by(cluster) |>                  
+  summarise(location = paste(rowname, collapse = ", ")) |>  
+  arrange(cluster) 
+```
+
+
+## 进一步处理这里的强相关
+
+```{r}
+USArrests |> ggpairs()
+```
+
+```{r}
+cor(USArrests)
+```
+
+### drop 1
+
+Assault and Murder 两个强相关
+
+```{r}
+df_drop <- USArrests |> select(-Murder)
+```
+
+
+```{r}
+yysfun_h_cluster <- function(data, k) {
+  df <- scale(data)
+  result <- dist(df, method = "euclidean")
+  result_hc <- hclust(d = result, method = "ward.D2")
+  fviz_dend(
+    result_hc,
+    k = k,
+    cex = 0.5,
+    color_labels_by_k = T,
+    rect = T  
+    )
+}
+```
+
+```{r}
+yysfun_k_cluster <- function(data, k) {
+  f1 <- fviz_nbclust(data, kmeans, method = "wss") 
+  
+  set.seed(123)
+  km_result <- kmeans(data, k)
+  km_result
+  
+  f2 <- fviz_cluster(
+    km_result,
+    data = data,
+    ellipse.type = "euclid",
+    # geom = "point",
+    palette = "lancet",
+    star.plot = T,
+    repel = T,
+    ggtheme = theme_bw()
+  )
+  list(f1, f2)
+}
+```
+
+
+```{r}
+yysfun_h_cluster(df_drop, 4)
+```
+
+```{r}
+yysfun_k_cluster(df_drop, 2)
+```
+
+
+
+```{r}
+map(df_drop |> select(Assault:Rape), yysfun_anova) |>
+  data.table::rbindlist(idcol = "term")
+```
+
+### PCA
+
+做PCA 可以拿 $\rho$ 或者 $\Sigma$ 阵, 两个结果是一样的
+
+前面标化过了, 我们直接拿 $\rho$ 来玩
+
+```{r}
+df |> head()
+```
+
+```{r}
+cor_data <- df |> cor()
+```
+
+得到特征根特征向量后面要用
+
+```{r}
+eigen_data <- eigen(cor_data)
+eigen_data
+```
+
+```{r}
+variance <- tibble(
+  eigenvalue = eigen_data$values,
+  Proportion_of_Variance = eigenvalue / sum(eigenvalue),
+  Cumulative_Proportion = cumsum(Proportion_of_Variance)
+  ) |> 
+  mutate(PC = c(1:length(eigenvalue))) |> 
+  dplyr::select(PC, everything())
+
+variance
+```
+
+
+```{r}
+eigen_vector <- as.matrix(eigen_data$vectors)
+PC_score <- df %*% eigen_vector
+colnames(PC_score) <- c(paste("PC", c(1:4), sep = "")) 
+PC_score |> head()
+```
+
+PC_score 就是我们要的 score, 我们前面选了 2 个, 所以要 PC1:PC2, 
+
+```{r}
+df_PC_score <- data.frame(PC_score[, 1:2], df)
+pcloading <- cor(df_PC_score)[-(1:2), 1:2]
+```
+
+
+```{r}
+yysfun_h_cluster(df_PC_score[, 1:2], 4)
+```
+
+
+```{r}
+yysfun_k_cluster(df_drop, 2)
+```
+
+
+# T2
+
+我的未发表的结果
+
+
+
+

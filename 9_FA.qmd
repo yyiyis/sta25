@@ -1,0 +1,340 @@
+---
+title: "9_FA"
+author: "YYS"
+date: "2025-6-7"
+toc: true
+number-sections: true
+format:
+  html:
+    theme: litera
+    df-print: kable
+---
+
+```{r setup}
+#| include: false
+knitr::opts_chunk$set(warning = F, message = F, dpi = 300)
+```
+
+```{r}
+rm(list = ls())
+```
+
+```{r}
+options(scipen = 200)
+```
+
+
+# load packages and data
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(showtext)
+library(psych)
+```
+
+```{r}
+showtext_auto()
+theme_set(theme_minimal(base_family = "PingFang SC"))
+```
+
+
+```{r}
+data <- read_excel("~/Desktop/r4ds/stahomework/M_25_sta/n9_FA/data.xlsx")
+```
+
+```{r}
+data <- data |> 
+  rename(location = 国家) |> 
+  mutate(across(c(x1:x9), as.double))
+```
+
+
+# methods1 之前的做法
+
+```{r}
+scale_data <- scale(data[, 2:10])
+scale_data |> cor()
+```
+
+## 不旋转
+
+```{r}
+pca1 <- princomp(scale_data, cor = T)
+summary(pca1, loadings = T)
+cbind(scale_data, round(predict(pca1)[,1:2], 3))
+```
+
+```{r}
+fac1 <- factanal(scale_data, 
+                 factors = 4, 
+                 rotation = 'none',
+                 method = "mle")
+fac1
+```
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+load1 <- loadings(fac1)
+plot(load1, type = 'n', main = '不旋转的因子分析载荷')
+text(load1, rownames(load1))
+```
+
+## varimax
+
+
+```{r}
+fac2 <- factanal(scale_data, factors = 4, rotation = 'varimax')
+fac2
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+load2 <- loadings(fac2)
+plot(load2, type = 'n', main = 'varimax 旋转的因子分析载荷')
+text(load2, rownames(load2))
+```
+
+## promax
+
+```{r}
+fac3 <- factanal(scale_data, factors = 4, rotation = 'promax', scores = 'regression')
+fac3
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+load3 <- loadings(fac3)
+plot(load3, type = 'n', main = 'promax 旋转的因子分析载荷')
+text(load3, rownames(load3))
+```
+
+## 因子得分
+
+用相关阵及 promax 旋转得到的因子得分
+
+```{r}
+cbind(scale_data, round(fac3$scores, 2))
+```
+
+
+
+# method 2 完整体系
+
+## cor
+
+```{r}
+dt <- data |> 
+  select(-location) |> 
+  scale() |> 
+  as.matrix()
+
+cor_data <- dt |> 
+  cor(use = "pairwise.complete.obs")
+
+eigen_data <- eigen(cor_data)
+eigen_data
+```
+
+## 方差贡献率
+
+
+```{r}
+variance <- tibble(
+  eigenvalue = eigen_data$values,
+  Proportion_of_Variance = eigenvalue / sum(eigenvalue),
+  Cumulative_Proportion = cumsum(Proportion_of_Variance)
+  ) |> 
+  mutate(PC = c(1:length(eigenvalue))) |> 
+  dplyr::select(PC, everything())
+
+variance
+```
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+fa.parallel(cor_data, fa = "both") 
+```
+
+
+## loading and PC_score
+
+```{r}
+eigen_vector <- as.matrix(eigen_data$vectors)
+PC_score <- dt %*% eigen_vector
+colnames(PC_score) <- c(paste("PC", c(1:9), sep = "")) 
+
+
+pcloading <- cor(data.frame(PC_score[, 1:4], 
+                            data |>
+                              select(-location)), 
+                 use = "pairwise.complete.obs")[-(1:4), 1:4]
+```
+
+
+
+## FA
+
+```{r}
+#| eval: false
+#| echo: false
+data |> 
+  select(-location) |> 
+  KMO()
+data |> 
+  select(-location) |> 
+  bartlett.test()
+```
+
+### PCA 法 不旋 
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+fa_pca <- principal(data |> select(-location), 
+                    2, 
+                    rotate = "none")
+fa_pca
+fa_pca$loadings
+fa.diagram(fa_pca, simple = T)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+fa_pca <- principal(data |> select(-location), 
+                    4, 
+                    rotate = "none")
+fa_pca
+fa_pca$loadings
+fa.diagram(fa_pca, simple = T)
+```
+
+
+
+### PCA 法 正交旋
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+fa_pca_varimax <- principal(data |> select(-location), 
+                            4, rotate = "varimax")
+fa_pca_varimax
+fa_pca_varimax$loadings
+fa.diagram(fa_pca_varimax, simple = T)
+```
+
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+fa_pca_varimax <- principal(data |> select(-location), 
+                            2, rotate = "varimax")
+fa_pca_varimax
+fa_pca_varimax$loadings
+fa.diagram(fa_pca_varimax, simple = T)
+```
+
+### PCA 法 斜交旋 
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+fa_pca_promax <- principal(data |> select(-location),
+                           2, rotate = "promax")
+fa_pca_promax
+fa_pca_promax$loadings
+fa.diagram(fa_pca_promax, simple = T)
+```
+
+## MLE 都不太好
+
+### 不旋
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+fa_mle <- fa(data |> select(-location),, 
+             nfactors = 2, 
+             rotate = 'none',
+             fm = 'ml', scores = T)
+fa_mle
+fa_mle$loadings
+fa.diagram(fa_mle, simple = T)
+```
+
+
+### 正交旋
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+fa_mle <- fa(data |> select(-location),, 
+             nfactors = 2,
+             rotate = 'varimax',
+             fm = 'ml', scores = T)
+fa_mle
+fa_mle$loadings
+fa.diagram(fa_mle, simple = T)
+```
+
+
+
+### 斜交旋
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+fa_mle <- fa(data |> select(-location), 
+             nfactors = 2, 
+             rotate = 'promax',
+             fm = 'ml', scores = T)
+fa_mle
+fa_mle$loadings
+fa.diagram(fa_mle, simple = T)
+```
+
+
+## Score total
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+fa_pca_varimax <- principal(data |> select(-location), 
+                            2, rotate = "varimax")
+fa_pca_varimax
+fa_pca_varimax$loadings
+fa.diagram(fa_pca_varimax, simple = T)
+```
+
+
+```{r}
+fa_pca_varimax$scores
+```
+
+
+$$Weight_i = \frac{\lambda}{\Sigma\lambda} =  Proportion_{var} \quad in \quad方差贡献率表$$
+
+
+$$FA_{score} = weight_1 * RC1 + weight_2 * RC_2$$
+```{r}
+cbind(as.matrix(fa_pca_varimax$scores) %*% as.matrix(variance[1:2, 3]),
+            data,
+            PC_score[, 1:2]) |>
+  as.data.frame() |> 
+  rename(FA_score = Proportion_of_Variance) |> 
+  arrange(desc(FA_score)) |> 
+  mutate(rank = c(1:nrow(data))) |>
+  relocate(location, rank, FA_score, PC1:PC2)
+```
+
+
+
+
